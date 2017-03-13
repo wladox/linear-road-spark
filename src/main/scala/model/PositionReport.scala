@@ -7,8 +7,8 @@ case class PositionReport(
                           time:Int,
                           vid:Int,
                           speed:Double,
-                          xWay:Short,
-                          lane:Short,
+                          xWay:Int,
+                          lane:Byte,
                           dir:Byte,
                           seg:Byte,
                           pos:Int

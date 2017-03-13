@@ -11,12 +11,13 @@ case class LREvent (
                      vid:Int,
                      speed:Double,
                      xWay:Short,
-                     lane:Short,
+                     lane:Byte,
                      dir:Byte,
                      seg:Byte,
                      pos:Int,
                      qid:Int,
-                     day:String
+                     day:Int,
+                     internalTime:Long
 ) extends Serializable{
 
   override def toString =
