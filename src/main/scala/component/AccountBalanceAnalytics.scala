@@ -1,5 +1,4 @@
-import model.AccountBalanceRequest
-import org.apache.spark.streaming.dstream.DStream
+package component
 
 /**
   * Created by root on 04.01.17.

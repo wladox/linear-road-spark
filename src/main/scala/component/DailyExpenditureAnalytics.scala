@@ -1,3 +1,5 @@
+package component
+
 /**
   * Created by root on 04.01.17.
   */

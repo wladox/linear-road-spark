@@ -1,19 +1,19 @@
 package model
 
 /**
-  * Created by root on 15.01.17.
+  * Created by wladox on 15.01.17.
   */
 case class PositionReport(
-                          time:Int,
-                          vid:Int,
-                          speed:Double,
-                          xWay:Int,
-                          lane:Byte,
-                          dir:Byte,
-                          seg:Byte,
-                          pos:Int
+                           time:Int,
+                           vid:Int,
+                           speed:Double,
+                           xWay:Int,
+                           lane:Byte,
+                           direction:Byte,
+                           segment:Byte,
+                           position:Int
                           ) {
 
   override def toString =
-    "POS: (time: " + time + ", vehicle: " + vid + ", speed: " + speed + ", pos: " + pos + ", xWay: " + xWay + ", lane: " + lane + ", direction: " + dir + ", segment: " + seg + ")"
+    s"$time.$vid.$speed.$position.$xWay.$lane.$direction.$segment"
 }
