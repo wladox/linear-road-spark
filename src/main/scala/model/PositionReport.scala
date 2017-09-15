@@ -11,7 +11,8 @@ case class PositionReport(
                            lane:Byte,
                            direction:Byte,
                            segment:Byte,
-                           position:Int
+                           position:Int,
+                           internalTime:Long
                           ) {
 
   override def toString =

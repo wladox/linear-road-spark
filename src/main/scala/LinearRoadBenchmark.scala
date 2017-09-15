@@ -1,83 +1,49 @@
-import component.{AccidentAnalytics, SegmentStatistics, TrafficAnalytics, VehicleStatistics}
-import component.AccidentAnalytics.MinXwayDir
-import component.TrafficAnalytics.{MinuteXWaySegDir, XwaySegDirVidMin}
+import component.AccountBalanceAnalytics.XwayVid
+import component.TrafficAnalytics.{XWaySegDirMinute, XwaySegDirVidMin}
+import component._
 import model._
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.common.serialization.StringDeserializer
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.types.{IntegerType, StructField, StructType}
+import org.apache.spark.storage.StorageLevel
 import org.apache.spark.streaming._
 import org.apache.spark.streaming.kafka010.{ConsumerStrategies, KafkaUtils, LocationStrategies}
 import org.apache.spark.util.LongAccumulator
-import org.apache.spark.{SparkConf, SparkContext}
+import org.apache.spark.{HashPartitioner, SparkConf, SparkContext}
 
 import scala.collection.mutable
 
 object LinearRoadBenchmark {
 
-  case class XwaySegDirLanePos(xWay:Int, seg:Byte, dir:Byte, lane:Byte, pos:Int)
-  case class XwayDirPosMin(xWay:Int,dir:Byte, pos:Int, min:Int)
-  case class VehicleStop(vid:Int, time:Int, xWay:Int, lane:Byte, pos:Int, dir:Byte)
-  case class AccidentInSegment(min:Int, xWay:Int, seg:Int, dir:Byte) {
-    override def toString: String = s"$min minute: Accident occured on xWay: $xWay segment $seg direction $dir"
-  }
-  case class XWayLaneDir(xWay:Int, lane:Byte, dir:Byte)
-  case class AccidentNotification(typ:Int, time:Int, emit:Long, seg:Int) {
-    override def toString: String = "ACCIDENT NOTIFICATIOn"
-  }
-  case class XwayDir(xWay:Int, dir:Byte)
-  case class Stop(vid:Int, time:Int, xWay:Int, lane:Byte, pos:Int, dir:Byte)
-  case class Accident(time:Int, xWay: Int, pos:Int, dir:Byte, stop1:Boolean, stop2:Boolean)
-  case class MinAvgSpeed(min:Int, xWay:Int, seg:Byte, dir:Byte, spd:Double, count:Int, time:Int, internalTime:Long) {
-    override def toString: String = s"AVG speed in $min minute, xWay: $xWay segment $seg direction $dir = $spd of $count vehicles"
-  }
-  case class TollNotification(typ:Byte, vid:Int, time:Int, emit:Long, spd:Double, toll:Double, internalTime:Long, response:Long) {
-    override def toString: String = s"TOLL NOTIFICATION for VID: $vid, time: $time, speed: $spd, toll: $toll, RESPONSE TIME: $response"
-  }
-  case class AccountBalanceRequest(typ:Int, time:Int, vid:Int, qid:Int, internalTime:Long)
-  case class AccountBalanceReport(typ:Int, time:Int, emit:Long, qid:Int, bal:Double, resultTime:Long, responseTime:Long)
-  case class DailyExpenditureRequest(typ:Int, time:Int, vid:Int, qid:Int, xWay:Int, day:Int, internalTime:Long)
-  case class DailyExpenditureReport(typ:Int, time:Int, emit:Long, qid:Int, bal:Double, reponseTime:Long)
-  case class VidXwayDay(vid:Int, xWay:Int, day:Int)
-  case class TollHistory(vid:Int, day: Int, xWay: Int, toll:Int)
-
-  val POSITION_REPORT   = 0
-  val ACCOUNT_BALANCE   = 2
-  val DAILY_EXPENDITURE = 3
-
-  object DroppedWordsCounter {
-
-    @volatile private var instance: LongAccumulator = null
-
-    def getInstance(sc: SparkContext): LongAccumulator = {
-      if (instance == null) {
-        synchronized {
-          if (instance == null) {
-            instance = sc.longAccumulator("WordsInBlacklistCounter")
-          }
-        }
-      }
-      instance
-    }
-  }
-
   def main(args: Array[String]): Unit = {
 
-    /*if (args.length < 2) {
-      System.err.println("Usage: NetworkWordCount <hostname> <port>")
+    if (args.length < 2) {
+      System.err.println("Usage: LinearRoadBenchmark <hostname> <port>")
       System.exit(1)
-    }*/
+    }
+
+    val host = args(0)
+    val port = args(1)
+
+    val outputDir     = "output/"
+    val checkpointDir = "checkpoint/"
 
     val conf = new SparkConf()
       .setMaster("local[*]") // use always "local[n]" locally where n is # of cores
-      .setAppName("LinearRoadBenchmark")
-      //.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+      //.setMaster(host+":"+port)
+      .setAppName("Linear Road Benchmark")
+      .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+      .set("spark.executor.memory", "2g")
+      .set("spark.kryo.registrationRequired", "false") // https://issues.apache.org/jira/browse/SPARK-12591
+
+    conf.registerKryoClasses(Array(classOf[Event], classOf[XWaySegDirMinute], classOf[PositionReport]))
 
     // initialize spark context
-    val sc = new SparkContext(conf)
+    val sc      = new SparkContext(conf)
+    val ssc     = new StreamingContext(sc, Seconds(1))
+    val spark   = SparkSession.builder.config(sc.getConf).getOrCreate()
 
-    // initialize spark streaming context
-    val ssc = new StreamingContext(sc, Seconds(1))
-
-    // provide checkpointing directory
     ssc.checkpoint("checkpoint/")
 
     // configure kafka consumer
@@ -93,69 +59,190 @@ object LinearRoadBenchmark {
     // define a map of interesting topics
     val topics = Array("position-reports")
 
-    val numReportsToCollect = 100
-    val outputDir = "output/"
-    var numReportsCollected = 0L
+    import spark.implicits._
 
-    val tollHistory = sc.textFile("/home/wladox/workspace/linear/input/car.dat.tolls.dat")
 
-    val stream = KafkaUtils.createDirectStream(
-      ssc,
-      LocationStrategies.PreferConsistent,
-      ConsumerStrategies.Subscribe[String, String](topics, kafkaParams)
-    )
+    val tollHistorySchema = StructType(Array(
+      StructField("vid", IntegerType, nullable = false),
+      StructField("day", IntegerType, nullable = false),
+      StructField("xway", IntegerType, nullable = false),
+      StructField("toll", IntegerType, nullable = false)))
 
-    //val events = ssc.socketTextStream("localhost",1234)
-    val events = stream.map(deserialize)
+    val tollHistory = spark
+      .read
+      .format("csv")
+      .schema(tollHistorySchema)
+      .load("/home/wladox/workspace/linear/input/history.dat")
+
+    val partitioner = new HashPartitioner(12)
+
+    val history = tollHistory
+      .rdd
+      .map(r => (r.getInt(0),( r.getInt(1), r.getInt(2), r.getInt(3) )))
+      .partitionBy(partitioner)
+      .cache()
+
+    /*val mappedtolls = sc.textFile("/home/wladox/workspace/linear/input/car.dat.tolls.dat").map(r => {
+      val line = r.split(",")
+      val vid = line(0).toInt
+      val day = line(1)
+      val xway = line(2)
+      val toll = line(3).toShort
+      (vid, (xway+"."+day, toll))
+    }).groupByKey().mapValues(values => values.toMap).cache()*/
+//    val historyData = tollHistory.rdd
+//      .map(r => (r.getInt(0), (r.getInt(1), r.getInt(2), r.getInt(3))))
+//      .partitionBy(new HashPartitioner(4))
+//      .groupByKey(4)
+//      .cache()
+
+    val eventStreams = (1 to 1).map(i => {
+      KafkaUtils.createDirectStream(
+        ssc,
+        LocationStrategies.PreferConsistent,
+        ConsumerStrategies.Subscribe[String, String](topics, kafkaParams)
+      )
+    })
+    val fullStream = ssc.union(eventStreams)
+
+    fullStream.checkpoint(Seconds(5))
+
+    val events = fullStream
+      .filter(r=>r.value().nonEmpty)
+      .map(deserializeEvent)
 
     val positionReports = events
       .filter(_.typ == 0)
       .map(toPositionReport)
-      .cache()
 
-    val accidents = positionReports
-      //.filter(r => r.speed == 0)
-      .map(r => (r.vid, r))
-      .mapWithState(StateSpec.function(AccidentAnalytics.updatePosition _))
-      .mapWithState(StateSpec.function(AccidentAnalytics.detectAccidents _))
-//      .flatMap(r => {
-//        for (i <- List.range(0, 5) ) yield (XwaySegDir(r._1.xWay, (r._1.segment - i).toByte, r._1.direction), r._2)
-//      })
-      .mapWithState(StateSpec.function(AccidentAnalytics.updateAccidents _))
-      .print(10)
-
-//    val accidentAlerts = positionReports
-//      .map(r => ( XwaySegDir(r.xWay, r.segment, r.direction), r))
-//      .join(accidents)
+    val keyedPositionReports = positionReports
+      .map(report => (report.vid, report))
 
 
+    // SEGMENT CROSSINGS =====================================
+    val vehicleState = StateSpec.function(SegmentStatistics.update _)
+    val segmentCrossings = keyedPositionReports
+      .mapWithState(vehicleState)
 
-      /*.filter(tuple => {
-        val posRep = tuple._2._1
-        val accident = tuple._2._2
-        accident.isDefined && posRep.segment >= accident.get.from && posRep.segment <= accident.get.to
-      })*/
 
-    val vehicleCounts = positionReports
+    // ACCIDENT DETECTION
+    val vehicleInformation = StateSpec.function(AccidentAnalytics.updateVehicleInformation _)
+    val accidentsState    = StateSpec.function(AccidentAnalytics.updateAccidents _) // ADD TIMEOUT
+
+    val accidents = segmentCrossings
+      .map(report => (report._1.vid, report._1))
+      .mapWithState(vehicleInformation)
+      .filter(_.isDefined)
+      .map(r => (r.get._1, r.get._2))
+      .mapWithState(accidentsState)
+
+
+
+    def red:(Int, Int) => Int = {
+      _ + _
+    }
+
+    // VEHICLE COUNT
+    val novState = StateSpec.function(TrafficAnalytics.vehicleCountPerMinute _)
+    val NOV = segmentCrossings
+      .map(r => (XWaySegDirMinute(r._1.xWay, r._1.segment, r._1.direction, r._1.time / 60 + 1), if (r._2) 1 else 0))
+      .reduceByKey(red, 4)
+      .mapWithState(novState)
+
+    // VEHICLE SPEED
+    val vehicleSpeedState = StateSpec.function(TrafficAnalytics.vehicleAvgSpd _) // ADD TIMEOUT
+    val avgMinuteSpeed = segmentCrossings
       .map(r => {
-        val min = ((r.time / 60) + 1).toShort
-        (MinuteXWaySegDir(min, r.xWay, r.segment, r.direction), r.vid)
+        val report = r._1
+        val min = ((report.time / 60) + 1).toShort
+        val key = XwaySegDirVidMin(report.xWay, report.segment, report.direction, report.vid, min)
+        (key, report.speed)
       })
-      .mapWithState(StateSpec.function(TrafficAnalytics.vehicleCountPerMinute _))
-
-    val avgSpeedPerVehicle = positionReports
-      .map(r => {
-        val min = ((r.time / 60) + 1).toShort
-        val key = XwaySegDirVidMin(r.xWay, r.segment, r.direction, r.vid, min)
-        (key, r.speed)
+      .mapWithState(vehicleSpeedState)
+      .reduceByKey((t1,t2) => {
+        (t1._1 + t2._1, t1._2 + t2._2)
       })
-      .mapWithState(StateSpec.function(TrafficAnalytics.vehicleAvgSpd _))
-
-    val speedSumPerMinute = avgSpeedPerVehicle
       .mapWithState(StateSpec.function(TrafficAnalytics.spdSumPerMinute _))
 
-    val avgSpdPerMinute = vehicleCounts.join(speedSumPerMinute)
-      .map(r => (r._1, r._2._2 / r._2._1))
+    // SEGMENT STATISTICS
+    val segmentStatistics = StateSpec.function(SegmentStatistics.updateTolls _)
+    val tolls = accidents
+      .join(NOV, 12)
+      .join(avgMinuteSpeed)
+      .map(r => {
+          val key = r._1
+          val minute = r._1.minute
+          val pos = r._2._1._1._1
+          val accident = r._2._1._1._2
+          val count = r._2._1._2
+          val speed = r._2._2
+          (XwaySegDir(key.xWay, key.seg, key.dir), (minute.toShort, pos, accident, count, speed))
+        })
+      .mapWithState(segmentStatistics)
+
+    tolls.checkpoint(Seconds(5))
+
+    val result = segmentCrossings
+      .map(r => (XwaySegDir(r._1.xWay, r._1.segment, r._1.direction), r._1.vid))
+      .join(tolls)
+      .map(r => {
+          val vid = r._2._1
+          val count = r._2._2._2
+          val speed = r._2._2._3
+          val acc = r._2._2._1
+          val lav = speed / count
+          val toll = if (lav >= 40 || count <= 50) 0 else 2 * math.pow(count - 50, 2)
+          TollNotification(0, vid, 99999, System.currentTimeMillis(), lav, toll)
+      })
+      .print(10)
+
+
+    /*val accidentAlerts = positionReports
+      .map(r => ( XwaySegDir(r.xWay, r.segment, r.direction), r))
+      .join(accidents)
+      .map(record => (record._2._1, record._2._2))
+      .print(10)*/
+
+
+
+
+    /*
+    val minAvg = vehicleCounts.join(speedSumPerMinute)
+    .map(r => {
+       (XwaySegDir(r._1.xWay, r._1.seg, r._1.dir), (r._2._1, r._2._2 / r._2._1))
+     })
+
+    val notification = segCrossings
+      .filter(_._2)
+      .map(r => {
+       (XwaySegDir(r._1.xWay, r._1.segment, r._1.direction), (r._1.vid, r._1.time, r._1.internalTime))
+      })
+      .join(minAvg)
+        .map(r => {
+          val vid = r._2._1._1
+          val time = r._2._1._2
+
+          val internalTime:Long= r._2._1._3
+
+          val nov = r._2._2._1
+          val lav = r._2._2._2
+          val emit = System.currentTimeMillis()
+
+          val accidents = false
+          if (lav <= 40 && nov >= 50 && !accidents) {
+            val toll = 2 * scala.math.pow(nov - 50, 2)
+            (vid, TollNotification(0, vid, time, emit, lav, toll, internalTime, emit - internalTime))
+          } else {
+            val toll = 0
+            (vid, TollNotification(0, vid, time, emit, lav, toll, internalTime, emit - internalTime))
+          }
+
+        })
+      .mapWithState(StateSpec.function(updateAccountBalance _))
+      //.foreachRDD(rdd => rdd.foreach(println))
+
+
+//      .mapWithState(StateSpec.function(TrafficAnalytics.lav _))
 
 
 //    val vehiclesTotalSpeedPerMinute = vehiclesPerMinute.join(avgSpeedPerMinute)
@@ -181,12 +268,6 @@ object LinearRoadBenchmark {
       (rdd, time) => {
         rdd.map(event => Event(event.time, event.vid, event.speed, event.xWay, event.lane, event.dir, event.seg, event.pos, event.qid, event.day, time.milliseconds))
       })*/
-
-    // SEGMENT CROSSINGS =====================================
-    val segCrossings = positionReports
-      .map(report => (report.vid, report))
-      .mapWithState(StateSpec.function(SegmentStatistics.update _))
-      .filter(r => r._2)
 
     // ACCIDENT DETECTION =====================================
 //    val stopPredicate = StateSpec.function(stopDetection _)
@@ -230,12 +311,16 @@ object LinearRoadBenchmark {
 //        rdd.saveAsTextFile("/output/tollalerts")
 //      })*/
 //      .saveAsTextFiles("output/toll/alerts")
-
-    // ACCOUNT BALANCE REQUESTS ========================================================
-//  val accBalState = StateSpec.function(getAccountBalance _)
+*/
+    //ACCOUNT BALANCE REQUESTS
+    val accountBalanceState = StateSpec.function(AccountBalanceAnalytics.getAccountBalance _).initialState(mappedtolls)
 
     val accountBalanceRequests = events
       .filter(e => e.typ == 2)
+        .map(r => (r.vid, r.xWay+"."+r.d))
+        .mapWithState(accountBalanceState)
+        .print(10)
+
 
 //      .transform((rdd, time) => {
 //        rdd.map(e => (e._2.vid, AccountBalanceRequest(2, e._2.time, e._2.vid, e._2.qid, time.milliseconds)))
@@ -248,23 +333,23 @@ object LinearRoadBenchmark {
 
 
     // DAILY EXPENDITURE REQUESTS =====================================
-//    val dailyExpenditureState = StateSpec.function(getDailyExpenditure _)
     val dailyExpenditures = events
-      .filter(e => e.typ == 3)
-
-//      .transform((rdd, time) => {
-//        rdd.map(e => (VidXwayDay(e._2.vid, e._2.xWay, e._2.day), (e._2.time, e._2.qid, time.milliseconds)))
-//      })
-//      .mapWithState(dailyExpenditureState)
-//      .saveAsTextFiles("/output/daily_expenditures")*/
+        .filter(_.typ == 3)
+        .map(e => {
+          (e.vid, (e.d, e.xWay, e.qid, e.internalTime))
+        })
+        .transform(rdd => {
+          rdd.join(history).filter(r => r._2._1._1 == r._2._2._1 && r._2._1._2 == r._2._2._2).map(r => {
+            DailyExpenditureReport(3, r._2._1._4, System.currentTimeMillis(), r._2._1._3, r._2._2._3, r._2._1._1)
+          })
+        })
 
 
     ssc.start()
     ssc.awaitTermination()
-
   }
 
-  def updateNOV(key: MinuteXWaySegDir, value:Option[Int], state:State[Int]):(MinuteXWaySegDir, Int) = {
+  def updateNOV(key: XWaySegDirMinute, value:Option[Int], state:State[Int]):(XWaySegDirMinute, Int) = {
 
     val s = state.getOption().getOrElse(0)
     val newState = s+value.get
@@ -343,7 +428,7 @@ object LinearRoadBenchmark {
     * @param state (TotalSpeed, Cars)
     * @return
     */
-  def updateMinuteAvgs(key: MinuteXWaySegDir, value: Option[(Double, Double, Int, Int, Long)], state: State[(Double, Int)]): (Int, MinAvgSpeed) = {
+  def updateMinuteAvgs(key: XWaySegDirMinute, value: Option[(Double, Double, Int, Int, Long)], state: State[(Double, Int)]): (Int, MinAvgSpeed) = {
 
     val spd = value.get._1
     val delta = value.get._2
@@ -461,21 +546,12 @@ object LinearRoadBenchmark {
   }
 
 
-  def updateAccountBalance(key: Int, value:Option[((TollNotification, Boolean), Option[AccidentNotification])], state:State[Double]):TollNotification = {
-
+  def updateAccountBalance(key: Int, value:Option[TollNotification], state:State[Double]):TollNotification = {
     val balance           = state.getOption().getOrElse(0.0)
-    val tollNotification  = value.get._1._1
-
-    if (value.get._2.isDefined) {
-      TollNotification(
-        0, tollNotification.vid, tollNotification.time, tollNotification.emit, tollNotification.spd, 0,
-        tollNotification.internalTime, tollNotification.emit - tollNotification.internalTime
-      )
-    } else {
-      state.update(balance + tollNotification.toll)
-      tollNotification
-    }
-
+    val toll  = value.get.toll
+    val newBalance = balance + toll
+    state.update(newBalance)
+    value.get
   }
 
   /**
@@ -505,7 +581,7 @@ object LinearRoadBenchmark {
     val internalTime = value.get._3
     val emit = System.currentTimeMillis()
     val bal = 0 // change to state.getOption().getOrElse
-    DailyExpenditureReport(3, time, emit, qid, bal, emit - internalTime)
+    DailyExpenditureReport(3, time, emit, qid, bal, 9999)
   }
 
   /**
@@ -514,7 +590,7 @@ object LinearRoadBenchmark {
     * @param record ConsumerRecord
     * @return Tuple (Type, Event)
     */
-  def deserialize(record: ConsumerRecord[String, String]): Event = {
+  def deserializeEvent(record: ConsumerRecord[String, String]): Event = {
     val array = record.value().trim().split(",")
       Event(array(0).toShort,
         array(1).toInt,
@@ -526,13 +602,18 @@ object LinearRoadBenchmark {
         array(7).toByte,
         array(8).toInt,
         array(9).toInt,
-        array(14).toInt,
-        -1
+        array(14).toShort,
+        record.timestamp()
       )
   }
 
+  def toTollHistory(e:String):TollHistory = {
+    val array = e.split(",")
+    TollHistory(array(0).toInt, array(1).toInt, array(2).toInt, array(3).toInt)
+  }
+
   def toPositionReport(e:Event):PositionReport = {
-    PositionReport(e.time, e.vid, e.speed, e.xWay, e.lane, e.direction, e.segment, e.position)
+    PositionReport(e.time, e.vid, e.speed, e.xWay, e.lane, e.direction, e.segment, e.position, e.internalTime)
   }
 
   def getTollHistoryEvent(line:String):TollHistory = {
@@ -550,6 +631,69 @@ object LinearRoadBenchmark {
   }
 
   def keyByVehicle(event: Event):(Int, PositionReport) = {
-    (event.vid, PositionReport(event.time, event.vid, event.speed, event.xWay, event.lane, event.direction, event.segment, event.position))
+    (event.vid, PositionReport(event.time, event.vid, event.speed, event.xWay, event.lane, event.direction, event.segment, event.position, event.internalTime))
   }
+
+  def deserializeInt(line:String):(Int, (Int,Int)) = {
+    val arr = line.split(",")
+    val vid = arr(0).toInt
+    val xway = arr(2).toInt
+    val day = arr(1).toInt
+    val toll = arr(3).toInt
+    (vid, (day, toll))
+  }
+
+  def requestsMapInt(line:String):(Int, (Int, Int)) = {
+    val arr = line.split(",")
+    val vid = arr(2).toInt
+    val xway = arr(4).toInt
+    val day = arr(14).toInt
+    val time = arr(1).toInt
+    (vid, (day, time))
+  }
+
+  case class XwaySegDirLanePos(xWay:Int, seg:Byte, dir:Byte, lane:Byte, pos:Int)
+  case class XwayDirPosMin(xWay:Int,dir:Byte, pos:Int, min:Int)
+  case class VehicleStop(vid:Int, time:Int, xWay:Int, lane:Byte, pos:Int, dir:Byte)
+  case class AccidentInSegment(min:Int, xWay:Int, seg:Int, dir:Byte) {
+    override def toString: String = s"$min minute: Accident occured on xWay: $xWay segment $seg direction $dir"
+  }
+  case class XWayLaneDir(xWay:Int, lane:Byte, dir:Byte)
+  case class AccidentNotification(typ:Int, time:Int, emit:Long, seg:Int) {
+    override def toString: String = "ACCIDENT NOTIFICATIOn"
+  }
+  case class XwayDir(xWay:Int, dir:Byte)
+  case class Stop(vid:Int, time:Int, xWay:Int, lane:Byte, pos:Int, dir:Byte)
+  case class Accident(time:Int, xWay: Int, pos:Int, dir:Byte, stop1:Boolean, stop2:Boolean)
+  case class MinAvgSpeed(min:Int, xWay:Int, seg:Byte, dir:Byte, spd:Double, count:Int, time:Int, internalTime:Long) {
+    override def toString: String = s"AVG speed in $min minute, xWay: $xWay segment $seg direction $dir = $spd of $count vehicles"
+  }
+  case class TollNotification(typ:Byte, vid:Int, time:Long, emit:Long, spd:Double, toll:Double)
+  case class AccountBalanceRequest(typ:Int, time:Int, vid:Int, qid:Int, internalTime:Long)
+  case class AccountBalanceReport(typ:Int, time:Int, emit:Long, qid:Int, bal:Double, resultTime:Long, responseTime:Long)
+  case class DailyExpenditureRequest(typ:Int, time:Int, vid:Int, qid:Int, xWay:Int, day:Int, internalTime:Long)
+  case class DailyExpenditureReport(typ:Int, time:Long, emit:Long, qid:Int, bal:Int, day:Short)
+
+  case class VidXwayDay(vid:Int, xWay:Int) {
+
+    override def canEqual(that: Any): Boolean = that.isInstanceOf[VidXwayDay]
+
+    override def hashCode(): Int = {
+      val prime = 31
+      var result = 1
+      result = prime * vid + xWay;
+      return result
+    }
+
+    override def equals(that: scala.Any) = {
+      that match {
+        case that:VidXwayDay => ( that canEqual this ) && (
+          this.vid == that.vid && this.xWay == that.xWay
+          )
+        case _ => false
+      }
+    }
+  }
+  case class TollHistory(vid:Int, day: Int, xWay: Int, toll:Int)
+
 }

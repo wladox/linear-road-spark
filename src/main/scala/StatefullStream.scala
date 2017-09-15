@@ -6,7 +6,7 @@ import org.apache.spark.streaming.{Seconds, StreamingContext}
   */
 object StatefullStream {
 
-  def main(args: Array[String]): Unit = {
+  /*def main(args: Array[String]): Unit = {
 
     val conf = new SparkConf()
       .setMaster("local[2]") // use always "local[n]" locally
@@ -41,5 +41,5 @@ object StatefullStream {
     ssc.start()
     ssc.awaitTermination()
   }
-
+*/
 }
