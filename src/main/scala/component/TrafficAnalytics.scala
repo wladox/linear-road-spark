@@ -52,16 +52,17 @@ object TrafficAnalytics {
     * @param state
     * @return
     */
-  def vehicleAvgSpd(key: XwaySegDirVidMin, value:Option[Double], state:State[Double]):(XWaySegDirMinute, (Double, Double)) = {
+  def vehicleAvgSpd(key: XWaySegDirMinute, value:Option[(Double,Int)], state:State[(Double,Int)]):(XWaySegDirMinute, Double) = {
     val currentSpd = value.get
     if (state.exists()) {
       val oldSpd = state.get()
-      val avg = (oldSpd + currentSpd) / 2
-      state.update(avg)
-      (XWaySegDirMinute(key.xWay, key.seg, key.dir, key.minute), (oldSpd, currentSpd) )
+      val newSpeed = oldSpd._1 + currentSpd._1
+      val newCount = oldSpd._2 + currentSpd._2
+      state.update((newSpeed, newCount))
+      (key, newSpeed/newCount)
     } else {
       state.update(currentSpd)
-      (XWaySegDirMinute(key.xWay, key.seg, key.dir, key.minute), (0.0, currentSpd) )
+      (key, currentSpd._1/currentSpd._2)
     }
 
   }
