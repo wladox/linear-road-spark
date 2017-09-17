@@ -16,16 +16,15 @@ object LinearRoadBenchmark {
   def main(args: Array[String]): Unit = {
 
     if (args.length < 2) {
-      System.err.println("Usage: LinearRoadBenchmark <hostname> <port> <history>")
+      System.err.println("Usage: LinearRoadBenchmark <hostname> <port> <output> <history> <checkpoint>")
       System.exit(1)
     }
 
-    val host = args(0)
-    val port = args(1)
-    val historicalData = args(2)
-
-    val outputDir     = "output/"
-    val checkpointDir = "checkpoint/"
+    val host          = args(0)
+    val port          = args(1)
+    val output        = args(2)
+    val historicalData = args(3)
+    val checkpointDir = args(4)
 
     val conf = new SparkConf()
       //.setMaster("local[*]") // use always "local[n]" locally where n is # of cores
@@ -42,7 +41,7 @@ object LinearRoadBenchmark {
     val ssc     = new StreamingContext(sc, Seconds(1))
     val spark   = SparkSession.builder.config(sc.getConf).getOrCreate()
 
-    ssc.checkpoint("checkpoint/")
+    ssc.checkpoint(checkpointDir)
 
     // configure kafka consumer
     val kafkaParams = Map[String, Object](
@@ -195,7 +194,7 @@ object LinearRoadBenchmark {
           val toll = if (lav >= 40 || count <= 50 || r._2._2.accidentExists) 0 else 2 * math.pow(count - 50, 2)
           TollNotification(vid, r._2._1._2, System.currentTimeMillis(), lav.toInt, toll.toInt)
       })
-      .saveAsTextFiles("output/query-0")
+      .saveAsTextFiles(output+"query-0")
 
 
     /*val accidentAlerts = positionReports
@@ -304,7 +303,7 @@ object LinearRoadBenchmark {
             DailyExpenditureReport(r._2._1._4, System.currentTimeMillis(), r._2._1._3, r._2._2._3, r._2._1._1)
           })
         })
-      .saveAsTextFiles("output/query-2")
+      .saveAsTextFiles(output+"query-2")
 
 
     ssc.start()
