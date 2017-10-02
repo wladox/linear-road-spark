@@ -8,3 +8,4 @@ output/
 src/main/java/
 src/test/
 spark-warehouse/
+data/

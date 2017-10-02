@@ -1,4 +1,4 @@
-package model
+package com.github.wladox.model
 
 import scala.collection.mutable
 

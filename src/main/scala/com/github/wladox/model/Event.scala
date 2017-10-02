@@ -1,4 +1,4 @@
-package model
+package com.github.wladox.model
 
 /**
   * Created by wladox on 04.12.16.
