@@ -1,11 +1,8 @@
 package structured
 
-import java.sql.Timestamp
-
-import model.{Event, PositionReport}
+import com.github.wladox.model.{Event, PositionReport}
 import org.apache.spark.sql._
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.streaming.GroupState
 import org.apache.spark.sql.types.{StructField, _}
 
 object StreamingWordCount {

@@ -1,9 +1,9 @@
 package com.github.wladox.component
 
 import com.github.wladox.component.VehicleStatistics.VehicleInformation
-import com.github.wladox.model.{Event, PositionReport, XWayLanePosDirKey, XwaySegDir}
-import org.apache.spark.streaming.{State, StateSpec}
+import com.github.wladox.model.XwaySegDir
 import org.apache.spark.streaming.dstream.{DStream, MapWithStateDStream}
+import org.apache.spark.streaming.{State, StateSpec}
 
 /**
   * Created by wladox on 04.01.17.
