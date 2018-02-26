@@ -1,11 +1,10 @@
 output/*
-target/
+target/*
 *.iml
 .idea/
 checkpoint/
 dependency-reduced-pom.xml
 output/
 src/main/java/
-src/test/
 spark-warehouse/
 data/

@@ -19,7 +19,7 @@ object AccidentAnalytics {
     * @param input Keyed stream of vehicles with vehicleID as key, and VehicleInformation as value
     * @return
     */
-  def process(input:DStream[(Int, VehicleInformation)]):DStream[(XWaySegDirMinute, Boolean)] = {
+  /*def process(input:DStream[(Int, VehicleInformation)]):DStream[(XWaySegDirMinute, Boolean)] = {
 
     val accidentsState = StateSpec.function(updateAccidents _)
 
@@ -30,7 +30,7 @@ object AccidentAnalytics {
     .reduceByKey((c1, c2) => {
       c1 || c2
     })
-  }
+  }*/
 
 
   /**

@@ -15,7 +15,7 @@ case class Event(
                   segment:Byte,
                   position:Int,
                   qid:Int,
-                  d:Short,
+                  day:Short,
                   internalTime:Long
 ) extends Serializable{
 
