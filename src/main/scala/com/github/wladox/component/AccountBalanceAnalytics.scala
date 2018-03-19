@@ -1,8 +1,5 @@
 package component
 
-import com.github.wladox.LinearRoadBenchmark.TollNotification
-import org.apache.spark.streaming.State
-
 /**
   * Created by wladox on 04.01.17.
   */

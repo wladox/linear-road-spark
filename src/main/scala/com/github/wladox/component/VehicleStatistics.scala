@@ -4,7 +4,7 @@ import com.github.wladox.LinearRoadBenchmark.XwayDir
 import com.github.wladox.model.PositionReport
 import org.apache.spark.streaming.State
 
-case class VehicleInformation(report:PositionReport, isStopped:Boolean, isCrossing:Boolean, lastLane:Int, lastPosition:Int)
+case class VehicleInformation(report:PositionReport, isStopped:Boolean, isCrossing:Boolean, lastLane:Byte, lastPosition:Int)
 case class Accident(time:Int, clearTime:Int, accidentCars:Set[Int])
 
 object VehicleStatistics {
@@ -71,7 +71,7 @@ object VehicleStatistics {
     * @param state (Lane,Pos)->Set(Vid)
     * @return XwayDir -> (Seg, Size, Min)
     */
-  def updateStoppedVehicles(key: XwayDir, value:Option[VehicleInformation], state:State[Map[(Int,Int), Set[Int]]]):(XwayDir, (VehicleInformation, Int)) = {
+  def updateStoppedVehicles(key: XwayDir, value:Option[VehicleInformation], state:State[Map[(Byte,Int), Set[Int]]]):(XwayDir, (VehicleInformation, Int)) = {
 
     val vehicleInfo = value.get
     val isStopped   = vehicleInfo.isStopped
@@ -117,7 +117,7 @@ object VehicleStatistics {
     * @param state
     * @return
     */
-  def updateAccidents(key: XwayDir, value:Option[(VehicleInformation, Int)], state:State[Map[Int, Accident]]):(XWaySegDirMinute, (VehicleInformation, Boolean)) = {
+  def updateAccidents(key: XwayDir, value:Option[(VehicleInformation, Int)], state:State[Map[Byte, Accident]]):(XWaySegDirMinute, (VehicleInformation, Byte)) = {
 
     val car             = value.get._1
     val vid             = car.report.vid
@@ -158,7 +158,7 @@ object VehicleStatistics {
       }
     } else {
       // clear old accident if the current car was involved
-      val lastSegment = car.lastPosition/5280
+      val lastSegment = (car.lastPosition/5280).toByte
       if (accidents.contains(lastSegment)) {
         val cleared = clearAccident(car.report, accidents(lastSegment))
         val newState = accidents ++ Map(lastSegment -> cleared)
@@ -186,12 +186,15 @@ object VehicleStatistics {
     // if values > -1 are found, check if one of them is smaller than the current minute
     // if yes, then there is accident detected else
 
-    val result = findAccident(minute, range)
+    val segm = findAccident(minute.toShort, range) match {
+      case Some(res) => res._1
+      case None => -1
+    }
 
-    (XWaySegDirMinute(key.xWay, car.report.segment, key.dir, minute),(car, result.nonEmpty))
+    (XWaySegDirMinute(key.xWay, car.report.segment, key.dir, minute.toShort),(car, segm.toByte))
   }
 
-  def findAccident(minute:Int, m:Map[Int, Accident]):Option[(Int, Accident)] = {
+  def findAccident(minute:Short, m:Map[Byte, Accident]):Option[(Byte, Accident)] = {
     m.find(t => {
       (t._2.time/60+1 < minute && t._2.clearTime == -1) || (t._2.time/60+1 < minute && minute < t._2.clearTime/60+1)
     })

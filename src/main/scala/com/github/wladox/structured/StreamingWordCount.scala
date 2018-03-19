@@ -167,16 +167,16 @@ object StreamingWordCount {
 
   def deserialize(array:Array[String]): Event = {
     Event(array(0).toShort,
-      array(1).toInt,
+      array(1).toShort,
       array(2).toInt,
-      array(3).toDouble,
-      array(4).toShort,
+      array(3).toFloat,
+      array(4).toByte,
       array(5).toByte,
       array(6).toByte,
       array(7).toByte,
       array(8).toInt,
-      array(9).toInt,
-      array(14).toShort,
+      array(9),
+      array(14).toByte,
       -1
     )
   }

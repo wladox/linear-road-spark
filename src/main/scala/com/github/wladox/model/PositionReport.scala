@@ -6,10 +6,10 @@ package com.github.wladox.model
 case class PositionReport(time:Int,
                            vid:Int,
                            speed:Float,
-                           xWay:Int,
-                           lane:Int,
-                           direction:Int,
-                           segment:Int,
+                           xWay:Byte,
+                           lane:Byte,
+                           direction:Byte,
+                           segment:Byte,
                            position:Int,
                            internalTime:Long
                           ) {

@@ -1,8 +1,11 @@
 package com.github.wladox
 
-import com.github.wladox.component.{TrafficAnalytics, VehicleInformation, VehicleStatistics, XWaySegDirMinute}
+import java.util
+
+import com.github.wladox.component.{TrafficAnalytics, VehicleStatistics, XWaySegDirMinute}
 import com.github.wladox.model.{Event, PositionReport, XwaySegDir}
 import org.apache.kafka.clients.consumer.ConsumerRecord
+import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.spark.streaming.kafka010.{ConsumerStrategies, KafkaUtils, LocationStrategies}
 import org.apache.spark.streaming.{Milliseconds, State, StateSpec, StreamingContext}
@@ -23,7 +26,7 @@ object LinearRoadBenchmark {
     override def toString: String = s"3,$time,$emit,$qid,$bal"
   }
   case class TollHistory(vid:Int, day: Int, xWay: Int, toll:Int)
-  case class XwayDir(xWay:Int, dir:Int)
+  case class XwayDir(xWay:Byte, dir:Byte)
   case class VehicleDayXway(vid:Int, day:Short, xWay:Short)
 
   def functionToCreateContext(host: String, port: Int, outputPath: String, checkpointDirectory: String): StreamingContext = {
@@ -75,7 +78,7 @@ object LinearRoadBenchmark {
     val historicalTolls = ssc.sparkContext.textFile("/home/wladox/workspace/LRSparkApplication/data/car.dat.tolls.dat")
       .map(r => {
         val arr = r.split(",")
-        ((arr(0).toInt, arr(2).toShort), arr(3).toByte)
+        ((arr(0).toInt, arr(2).toByte), arr(3).toByte)
       })
       .groupByKey
       .mapValues(_.toArray)
@@ -106,22 +109,53 @@ object LinearRoadBenchmark {
     val events = streams
       .filter(_.value().trim().nonEmpty)
       .map(deserializeEvent)
+      .cache()
 
 
     // ##################### DAILY EXPENDITURES ######################
     val daily = events
       .filter(_.typ == 3)
       .map(e => {
-        ((e.vid,e.xWay.toShort), (e.qid, e.day.toByte))
+        ((e.vid,e.xWay), (e.qid, e.day, e.time, e.internalTime))
       })
       .transform(
         requests => {
           requests.join(historicalTolls).map(r => {
             val qid   = r._2._1._1
+            val time = r._2._1._3
+            val emit = math.round((System.currentTimeMillis() - r._2._1._4)/1000f) + time
             val state = r._2._2
-            (qid, state(r._2._1._2-1))
+            s"3,$time,$emit,$qid,${state(r._2._1._2-1)}"
           })
         })
+      .foreachRDD(rdd => {
+        rdd.foreachPartition(partition => {
+          // Print statements in this section are shown in the executor's stdout logs
+          val kafkaOpTopic = "type-3-output"
+          val props = new util.HashMap[String, Object]()
+
+          props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092")
+          props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer")
+          props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer")
+
+          val producer = new KafkaProducer[String,String](props)
+          partition.foreach( record => {
+            val data = record.toString
+            // As as debugging technique, users can write to DBFS to verify that records are being written out
+            // dbutils.fs.put("/tmp/test_kafka_output",data,true)
+            val message = new ProducerRecord[String, String](kafkaOpTopic, null, data)
+            producer.send(message)
+          } )
+          producer.close()
+        })
+      })
+//      .saveAsTextFiles("output/type-3")
+
+    // ##################### ACCOUNT BALANCE REQUESTS ######################
+    val accRequests = events
+      .filter(_.typ == 2)
+      .map(e => ((e.vid, e.xWay), "get,"+e.time+","+e.internalTime+","+e.qid))
+
 
     val positionReports = events
       .filter(_.typ == 0)
@@ -150,14 +184,43 @@ object LinearRoadBenchmark {
       .mapWithState(StateSpec.function(VehicleStatistics.updateStoppedVehicles _))
       .mapWithState(StateSpec.function(VehicleStatistics.updateAccidents _))
 
-    //accidents.saveAsTextFiles("output/type-1")
+    accidents
+      .filter(_._2._2 != -1)
+      .map(r => {
+        val time = r._2._1.report.time
+        val emit = math.round((System.currentTimeMillis() - r._2._1.report.internalTime)/1000f) + time
+        s"1,$time,$emit,${r._2._2}"
+      })
+      .foreachRDD(rdd => {
+        rdd.foreachPartition(partition => {
+          // Print statements in this section are shown in the executor's stdout logs
+          val kafkaOpTopic = "type-1-output"
+          val props = new util.HashMap[String, Object]()
+
+          props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092")
+          props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer")
+          props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer")
+
+          val producer = new KafkaProducer[String,String](props)
+          partition.foreach( record => {
+            val data = record.toString
+            // As as debugging technique, users can write to DBFS to verify that records are being written out
+            // dbutils.fs.put("/tmp/test_kafka_output",data,true)
+            val message = new ProducerRecord[String, String](kafkaOpTopic, null, data)
+            producer.send(message)
+          } )
+          producer.close()
+        })
+      })
+
+//    accidents.saveAsTextFiles("output/type-1")
 
     // ##################### NUMBER OF VEHICLES LOGIC ######################
 
     //val positionReportCount = StateSpec.function(TrafficAnalytics.updateNOV _)
 
     val nov = vehicleStats
-      .map(r => (XWaySegDirMinute(r._2.report.xWay, r._2.report.segment, r._2.report.direction, r._2.report.time/60+1), if (r._2.isCrossing) 1 else 0))
+      .map(r => (XWaySegDirMinute(r._2.report.xWay, r._2.report.segment, r._2.report.direction, (r._2.report.time/60+1).toShort), if (r._2.isCrossing) 1 else 0))
       .reduceByKey((r1, r2) => r1 + r2)
       .map(r => (XwaySegDir(r._1.xWay, r._1.seg, r._1.dir), (r._1.minute, r._2)))
       .mapWithState(StateSpec.function(TrafficAnalytics.updateNOV2 _))
@@ -165,19 +228,19 @@ object LinearRoadBenchmark {
     // ##################### AVERAGE VELOCITY LOGIC ######################
 
     val reports = positionReports
-      .map(r => (XWaySegDirMinute(r._2.xWay, r._2.segment, r._2.direction, r._2.time/60+1), 1))
+      .map(r => (XWaySegDirMinute(r._2.xWay, r._2.segment, r._2.direction, (r._2.time/60+1).toShort), 1))
       .reduceByKey((r1, r2) => r1 + r2)
       .mapWithState(StateSpec.function(TrafficAnalytics.vehicleCount _))
 
     val velocities = positionReports
-      .map(r => (XWaySegDirMinute(r._2.xWay, r._2.segment, r._2.direction, r._2.time/60+1), r._2.speed))
+      .map(r => (XWaySegDirMinute(r._2.xWay, r._2.segment, r._2.direction, (r._2.time/60+1).toShort), r._2.speed))
       .reduceByKey((r1, r2) => r1 + r2)
       .mapWithState(StateSpec.function(TrafficAnalytics.spdSumPerMinute _))
 
     val avgVelocities = reports
       .join(velocities)
       .map(r => {
-        (XwaySegDir(r._1.xWay, r._1.seg, r._1.dir), (r._1.minute ,r._2._2/r._2._1))
+        (XwaySegDir(r._1.xWay, r._1.seg, r._1.dir), (r._1.minute , r._2._2/r._2._1))
       })
       .mapWithState(StateSpec.function(TrafficAnalytics.lav _))
 
@@ -188,12 +251,43 @@ object LinearRoadBenchmark {
       .join(segmentStats)
       .map(r => {
         val info = r._2._1._1
-        val isAccident = r._2._1._2
+        val isAccident = r._2._1._2 != -1
         val lav = r._2._2._1
         val nov = r._2._2._2
         val toll = calculateToll(lav, nov, isAccident)
-        (info.report.vid, r._2._1._1.report.time, -1, lav, toll)
+
+        val emit = math.round((System.currentTimeMillis() - info.report.internalTime)/1000f) + info.report.time
+
+        ((info.report.vid, info.report.xWay), "update,"+info.report.time+","+emit+","+lav+","+toll)
+        //(info.report.vid, r._2._1._1.report.time, -1, lav, toll)
       })
+
+    val tollAssessment = tolls
+      .union(accRequests)
+      .mapWithState(StateSpec.function(accountBalance _))
+      .foreachRDD(rdd => {
+        rdd.foreachPartition(partition => {
+          // Print statements in this section are shown in the executor's stdout logs
+          val kafkaOpTopic = "type-02-output"
+          val props = new util.HashMap[String, Object]()
+
+          props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092")
+          props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer")
+          props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer")
+
+          val producer = new KafkaProducer[String,String](props)
+          partition.foreach( record => {
+            val data = record.toString
+            // As as debugging technique, users can write to DBFS to verify that records are being written out
+            // dbutils.fs.put("/tmp/test_kafka_output",data,true)
+            val message = new ProducerRecord[String, String](kafkaOpTopic, null, data)
+            producer.send(message)
+          } )
+          producer.close()
+        })
+      })
+
+//      .saveAsTextFiles("output/type-02")
 
 
     // ##################### AVERAGE VELOCITY LOGIC ######################
@@ -253,6 +347,39 @@ object LinearRoadBenchmark {
 
     ssc.start()
     ssc.awaitTermination()
+  }
+
+  def accountBalance(key: (Int, Byte), value:Option[String], state:State[Array[Int]]):String = {
+
+    val arr = value.get.split(",")
+
+    val currentBalance = state.getOption().getOrElse(Array[Int](0,0))
+
+    val res = if (arr(0).equals("update")) {
+
+      val time = arr(1).toInt
+      val emit = arr(2)
+      val lav = arr(3)
+      val toll = arr(4).toInt
+
+      currentBalance(0) = time
+      currentBalance(1) += toll
+
+      state.update(currentBalance)
+
+      s"0,${key._1},$time,$emit,$lav,$toll"
+
+    } else {
+
+      val time = arr(1).toShort
+      val intTime = arr(2).toLong
+      val qid = arr(3)
+      val emit = math.round((System.currentTimeMillis() - intTime)/1000f)+time
+
+      s"2,$time,$emit,$qid,$currentBalance"
+    }
+
+    res
   }
 
   @deprecated
@@ -402,16 +529,16 @@ object LinearRoadBenchmark {
     val array = record.value().trim().split(",")
       Event(
         array(0).toShort,
-        array(1).toInt,
+        array(1).toShort,
         array(2).toInt,
         array(3).toFloat,
-        array(4).toShort,
+        array(4).toByte,
         array(5).toByte,
         array(6).toByte,
         array(7).toByte,
         array(8).toInt,
-        array(9).toInt,
-        array(14).toShort,
+        array(9),
+        array(14).toByte,
         record.timestamp()
       )
   }

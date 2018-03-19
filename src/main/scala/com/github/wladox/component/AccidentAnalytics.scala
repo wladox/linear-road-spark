@@ -41,7 +41,7 @@ object AccidentAnalytics {
     * @return Tuple with XWaySegDirMinute and a flag signaling the existence of accidents
     *
     */
-  def updateAccidents(key:XwaySegDir, value:Option[(Int,Int,Boolean,Int)], state:State[Map[Int, Set[Int]]]): (XWaySegDirMinute, Boolean) = {
+  def updateAccidents(key:XwaySegDir, value:Option[(Int,Int,Boolean,Short)], state:State[Map[Int, Set[Int]]]): (XWaySegDirMinute, Boolean) = {
 
     val vid       = value.get._1
     val position  = value.get._2

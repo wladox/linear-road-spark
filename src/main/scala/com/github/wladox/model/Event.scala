@@ -6,16 +6,16 @@ package com.github.wladox.model
 
 case class Event(
                   typ:Int,
-                  time:Int,
+                  time:Short,
                   vid:Int,
                   speed:Float,
-                  xWay:Int,
-                  lane:Int,
-                  direction:Int,
-                  segment:Int,
+                  xWay:Byte,
+                  lane:Byte,
+                  direction:Byte,
+                  segment:Byte,
                   position:Int,
-                  qid:Int,
-                  day:Int,
+                  qid:String,
+                  day:Byte,
                   internalTime:Long
 ) extends Serializable{
 
