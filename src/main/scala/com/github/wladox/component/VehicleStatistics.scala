@@ -1,33 +1,13 @@
 package com.github.wladox.component
 
+import com.github.wladox.LinearRoadBenchmark.XwayDir
 import com.github.wladox.model.PositionReport
-import org.apache.spark.streaming.dstream.DStream
-import org.apache.spark.streaming.{State, StateSpec}
+import org.apache.spark.streaming.State
+
+case class VehicleInformation(report:PositionReport, isStopped:Boolean, isCrossing:Boolean, lastLane:Int, lastPosition:Int)
+case class Accident(time:Int, clearTime:Int, accidentCars:Set[Int])
 
 object VehicleStatistics {
-
-  case class VehicleInformation(time:Int,
-                                vid:Int,
-                                xWay:Int,
-                                position:Int,
-                                lane:Int,
-                                direction:Byte,
-                                speed:Double,
-                                internalTime:Long,
-                                prevLane: Int,
-                                prevPos:Int)
-
-
-  /**
-    * Updates each vehicle's information. @see updateVehicleInformation
-    *
-    * @param input Keyed stream of vehicles with vehicleID as key, and VehicleInformation as value
-    * @return
-    */
-  def update(input:DStream[(Int, PositionReport)]):DStream[(Int, (VehicleInformation, Boolean, Boolean, Double, Double, Int))] = {
-    val vehicleReports  = StateSpec.function(updateLastReport _).numPartitions(2)
-    input.mapWithState(vehicleReports)
-  }
 
   /**
     * Updates latest vehicle state to calculate current  speed, whether the vechile is stopped.
@@ -37,44 +17,34 @@ object VehicleStatistics {
     * @param state  previous position report, stop counter
     * @return stream with updated vehicle information (VID, (Positionreport, isStopped, isSegmentCrossing, subtractSpeed, addSpeed, vehicleCount))
     */
-  def updateLastReport(vid:Int, value:Option[PositionReport], state:State[(PositionReport, Int)]):(Int, (VehicleInformation, Boolean, Boolean, Double, Double, Int)) = {
+  def updateLastReport(vid:Int, value:Option[PositionReport], state:State[(PositionReport, Int)]):(Int, VehicleInformation) = {
 
     val currentReport = value.get
 
     state.getOption() match {
-      case Some(p) =>
-        val reportsAreEqual = {
-          p._1.xWay == currentReport.xWay && p._1.position == currentReport.position && p._1.direction == currentReport.direction
-        }
-        val newCounter  = if (reportsAreEqual) p._2 + 1 else 1
-        val segmentCrossed = currentReport.segment != p._1.segment && currentReport.time/60 > p._1.time/60
-        val vehicleCount = if (currentReport.time/60 != p._1.time/60) 1 else 0
-        state.update((currentReport, newCounter))
-        val isStopped = newCounter >= 4
-        val vehInfo = VehicleInformation(currentReport.time,
-          currentReport.vid,
-          currentReport.xWay,
-          currentReport.position,
-          currentReport.lane,
-          currentReport.direction,
-          currentReport.speed,
-          currentReport.internalTime,
-          p._1.lane, p._1.position)
-        (vid, (vehInfo, isStopped, segmentCrossed, p._1.speed, currentReport.speed, vehicleCount))
-      case None =>
-        state.update(currentReport, 1)
-        val vehInfo = VehicleInformation(currentReport.time,
-          currentReport.vid,
-          currentReport.xWay,
-          currentReport.position,
-          currentReport.lane,
-          currentReport.direction,
-          currentReport.speed,
-          currentReport.internalTime,
-          -1, -1)
-        (vid, (vehInfo, false, true, 0, currentReport.speed, 1))
-    }
+      case Some(lastReport) =>
 
+        val equal = positionChanged(lastReport._1, currentReport)
+
+        val segmentCrossed = currentReport.segment != lastReport._1.segment
+
+        val newCounter    = if (equal) lastReport._2 + 1 else 1
+
+        val isStopped = newCounter >= 4
+
+        val info = VehicleInformation(currentReport, isStopped, segmentCrossed, lastReport._1.lane, lastReport._1.position)
+
+        state.update((currentReport, newCounter))
+
+        (vid, info)
+      case None =>
+
+        state.update(currentReport, 1)
+
+        val vehInfo = VehicleInformation(currentReport, isStopped = false, isCrossing = true, currentReport.lane, currentReport.position)
+
+        (vid, vehInfo)
+    }
 //    val previousPosition:VehicleInformation = state.getOption().getOrElse(
 //      VehicleInformation(-1, -1, -1, -1, -1, stopped = false, segmentCrossing = false, -1, -1)
 //    )
@@ -90,4 +60,146 @@ object VehicleStatistics {
 
   }
 
+  def positionChanged(r1:PositionReport, r2:PositionReport):Boolean = {
+    r1.xWay == r2.xWay && r1.position == r2.position && r1.direction == r2.direction
+  }
+
+  /**
+    *
+    * @param key
+    * @param value
+    * @param state (Lane,Pos)->Set(Vid)
+    * @return XwayDir -> (Seg, Size, Min)
+    */
+  def updateStoppedVehicles(key: XwayDir, value:Option[VehicleInformation], state:State[Map[(Int,Int), Set[Int]]]):(XwayDir, (VehicleInformation, Int)) = {
+
+    val vehicleInfo = value.get
+    val isStopped   = vehicleInfo.isStopped
+    val minute      = vehicleInfo.report.time/60
+
+    val mapKey      = (vehicleInfo.report.lane, vehicleInfo.report.position)
+
+    val s = state.getOption().getOrElse(Map())
+
+    // if the vehicle is stopped, check if its VID is stored in the set of stopped vehicles on the given lane and position
+    val newMap = if (isStopped) {
+      // check if the map contains a set for the given lane and position
+      // if there is a set, then add the VID to the set of stopped vehicles
+      // otherwise create a new set with the given VID
+      val newSet = if (s.contains(mapKey))
+        s(mapKey) + vehicleInfo.report.vid
+      else
+        Set(vehicleInfo.report.vid)
+      s + (mapKey -> newSet)
+    } else {
+      // if the vehicle is not stopped check if there is a set stored for the previous lane and position of the vehicle
+      // and remove the VID from this set
+      // otherwise do nothing
+      val prevKey = (vehicleInfo.lastLane, vehicleInfo.lastPosition)
+      if (s.contains(prevKey)) {
+        val newSet = s(prevKey) - vehicleInfo.report.vid
+        s + (prevKey -> newSet)
+      } else {
+        s
+      }
+
+    }
+
+    state.update(newMap)
+    val stoppedCars = newMap.getOrElse(mapKey, Set()).size
+    (key, (vehicleInfo, stoppedCars))
+  }
+
+  /**
+    *
+    * @param key
+    * @param value
+    * @param state
+    * @return
+    */
+  def updateAccidents(key: XwayDir, value:Option[(VehicleInformation, Int)], state:State[Map[Int, Accident]]):(XWaySegDirMinute, (VehicleInformation, Boolean)) = {
+
+    val car             = value.get._1
+    val vid             = car.report.vid
+    val segment         = car.report.segment
+    val stoppedVehicles = value.get._2
+    val minute          = car.report.time/60+1
+
+    //val accidents:Array[Int] = state.getOption().getOrElse(Array.fill(100)(-1))
+    val accidents = state.getOption().getOrElse(Map())
+
+    // UPDATE/CREATE ACCIDENTS
+    // if the current vehicle is stopped and the # of stopped vehicles on the lane and position of the current vehicle
+    // is greater than 1, then we need to create or update an accident
+    // if there is no accident stored for the given segment create new accident
+
+    if (car.isStopped) {
+      // there is an accident
+      if (stoppedVehicles > 1) {
+        if (accidents.contains(segment)) {
+          // there is already an accident on the given segment, so just add the VID to it
+          val acc = accidents(segment)
+          val accCars = acc.accidentCars
+          // update crashed cars
+          if (!accCars.contains(vid)) {
+            val newState = accidents ++ Map(segment -> Accident(acc.time, acc.clearTime, accCars ++ Seq(vid)))
+            state.update(newState)
+          }
+        } else {
+          // there is no accident stored for the given segment, so create new
+          val accident = Accident(minute, -1, Set(vid))
+          val newState = accidents ++ Map(segment -> accident)
+          state.update(newState)
+        }
+
+      } else {
+      // only 1 car is stopped, maybe there is an accident
+
+      }
+    } else {
+      // clear old accident if the current car was involved
+      val lastSegment = car.lastPosition/5280
+      if (accidents.contains(lastSegment)) {
+        val cleared = clearAccident(car.report, accidents(lastSegment))
+        val newState = accidents ++ Map(lastSegment -> cleared)
+        state.update(newState)
+      } else if (accidents.contains(segment)) {
+        val cleared = clearAccident(car.report, accidents(segment))
+        val newState = accidents ++ Map(lastSegment -> cleared)
+        state.update(newState)
+      }
+    }
+
+    // RETRIEVE ACCIDENTS IN SEGMENT RANGE
+    val range = if (key.dir == 0) {
+      val to = segment+4
+      accidents.filter(e => e._1 >= segment && e._1 <= to)
+    } else {
+      val from = segment-4
+      accidents.filter(e => e._1 >= from && e._1 <= segment)
+    }
+
+    // direction: 0 -> eastbound, 1 <- westbound
+    // depending on direction:
+    // if eastbound +5 segment from current segment
+    // if westbound -5 segments from current segment
+    // if values > -1 are found, check if one of them is smaller than the current minute
+    // if yes, then there is accident detected else
+
+    val result = findAccident(minute, range)
+
+    (XWaySegDirMinute(key.xWay, car.report.segment, key.dir, minute),(car, result.nonEmpty))
+  }
+
+  def findAccident(minute:Int, m:Map[Int, Accident]):Option[(Int, Accident)] = {
+    m.find(t => {
+      (t._2.time/60+1 < minute && t._2.clearTime == -1) || (t._2.time/60+1 < minute && minute < t._2.clearTime/60+1)
+    })
+  }
+
+  def clearAccident(p:PositionReport, acc:Accident):Accident = {
+    if (acc.accidentCars.contains(p.vid) && acc.clearTime == -1)
+      Accident(acc.time, p.time, acc.accidentCars)
+    acc
+  }
 }

@@ -1,10 +1,7 @@
 package com.github.wladox.component
 
-import com.github.wladox.component.TrafficAnalytics.XWaySegDirMinute
-import com.github.wladox.component.VehicleStatistics.VehicleInformation
-import com.github.wladox.model.{PositionReport, XwaySegDir}
-import org.apache.spark.streaming.{State, StateSpec}
-import org.apache.spark.streaming.dstream.DStream
+import com.github.wladox.model.XwaySegDir
+import org.apache.spark.streaming.State
 
 /**
   * This class provides functionality to maintain latest vehicle's state and accident detection

@@ -1,35 +1,32 @@
 package com.github.wladox.component
 
 import com.github.wladox.LinearRoadBenchmark.XwayDir
-import com.github.wladox.component.VehicleStatistics.VehicleInformation
-import com.github.wladox.model.XwaySegDir
-import org.apache.spark.streaming.dstream.{DStream, MapWithStateDStream}
-import org.apache.spark.streaming.{State, StateSpec}
+import com.github.wladox.model.{PositionReport, XwaySegDir}
+import org.apache.spark.streaming.State
 
 /**
   * Created by wladox on 04.01.17.
   */
+
+case class CarSpeed(vid:Int, spd:Int)
+case class TollNotification(typ:Int, vid:Int, time: Long, emit: Long, spd: Double, toll: Double, nov:Int) {
+  override def toString =
+    "TOLL: (type: " + typ + ", time: " + time + ", emit: "+ emit + ", vehicle: " + vid + ", speed: " + spd + ", toll: " + toll + ", nov: " + nov + ")"
+}
+case class CarStoppedEvent(vid:Int, pos: Int)
+case class PositionReportHistory(xWay:Int, lane:Short, pos:Int, dir:Byte, count:Int)
+case class LAVEvent(key: XWaySegDirMinute, state:Double) {
+  override def toString: String = s"AVG VELOCITY on $key is $state"
+}
+case class NOVEvent(key: XWaySegDirMinute, nov:Int) {
+  override def toString: String = s"NOV: $key -> $nov"
+}
+case class XWaySegDirMinute(xWay:Int, seg:Int, dir:Int, minute: Int) {
+  override def toString: String = xWay + "." + seg + "." + dir + "." + minute
+}
+case class  XwaySegDirVidMin(xWay:Int, seg:Byte, dir:Byte, vid:Int, minute:Short)
+
 object TrafficAnalytics {
-
-  case class CarSpeed(vid:Int, spd:Int)
-  case class TollNotification(typ:Int, vid:Int, time: Long, emit: Long, spd: Double, toll: Double, nov:Int) {
-    override def toString =
-      "TOLL: (type: " + typ + ", time: " + time + ", emit: "+ emit + ", vehicle: " + vid + ", speed: " + spd + ", toll: " + toll + ", nov: " + nov + ")"
-  }
-  case class CarStoppedEvent(vid:Int, pos: Int)
-  case class PositionReportHistory(xWay:Int, lane:Short, pos:Int, dir:Byte, count:Int)
-  case class LAVEvent(key: XWaySegDirMinute, state:Double) {
-    override def toString: String = s"AVG VELOCITY on $key is $state"
-  }
-  case class NOVEvent(key: XWaySegDirMinute, nov:Int) {
-    override def toString: String = s"NOV: $key -> $nov"
-  }
-
-  case class XWaySegDirMinute(xWay:Int, seg:Byte, dir:Byte, minute: Int) {
-    override def toString: String = minute + "." + xWay + "." + seg + "." + dir
-  }
-
-  case class  XwaySegDirVidMin(xWay:Int, seg:Byte, dir:Byte, vid:Int, minute:Short)
 
   /**
     * Counts vehicles per minute.
@@ -39,11 +36,14 @@ object TrafficAnalytics {
     * @param state - current number of vehicles on an expressway,segment,direction and minute
     * @return - updated number of vehicles
     */
-  def vehicleCountPerMinute(key: XWaySegDirMinute, value:Option[Int], state:State[Int]) : (XWaySegDirMinute, Int) = {
-    val currentCount = state.getOption().getOrElse(0)
-    val newCount = currentCount + value.get
+  def vehicleCount(key: XWaySegDirMinute, value:Option[Int], state:State[Int]) : (XWaySegDirMinute, Int) = {
+
+    val newCount = state.getOption() match {
+      case Some(s) => s + value.get
+      case None => value.get
+    }
     state.update(newCount)
-    (XWaySegDirMinute(key.xWay, key.seg, key.dir, key.minute), newCount)
+    (key, newCount)
   }
 
   /**
@@ -132,18 +132,19 @@ object TrafficAnalytics {
   /**
     * Updates sum of vehicle speeds per minute.
     *
-    * @param key
+    * @param key XWaySegDirMinute
     * @param value
     * @param state
     * @return
     */
-  def spdSumPerMinute(key:XWaySegDirMinute, value:Option[(Double, Double)], state:State[Double]):(XWaySegDirMinute, Double) = {
+  def spdSumPerMinute(key:XWaySegDirMinute, value:Option[Float], state:State[Float]):(XWaySegDirMinute, Float) = {
 
-    val oldAvg = state.getOption().getOrElse(0.0)
-    val newState = oldAvg - value.get._1 + value.get._2
+    val newState = state.getOption() match {
+      case Some(s) => s + value.get
+      case None => value.get
+    }
     state.update(newState)
     (XWaySegDirMinute(key.xWay, key.seg, key.dir, key.minute), newState)
-
   }
 
   /**
@@ -154,31 +155,31 @@ object TrafficAnalytics {
     * @param state
     * @return
     */
-  def lav(key:XwaySegDir, value:Option[(Int, Double)], state:State[collection.immutable.Map[Int, Double]]):(XWaySegDirMinute, Double) = {
+  def lav(key:XwaySegDir, value:Option[(Int, Float)], state:State[Map[Int, Float]]):(XWaySegDirMinute, Int) = {
 
     val minute = value.get._1
     val speed = value.get._2
 
-    state.getOption() match {
+    val newMap = state.getOption() match {
       case Some(s) =>
-        if (minute <= 5) {
-          val newMap = collection.immutable.Map[Int, Double](minute -> speed) ++ s
-          state.update(newMap)
+        val newAvg = if (s.contains(minute)) {
+          s(minute) + speed
         } else {
-          val newMap = collection.immutable.Map[Int, Double](minute -> speed) ++ s.slice(minute-5, minute-1)
-          state.update(newMap)
+          speed
         }
-        val speeds = for (i <- minute-5 until minute if i > 0 && s.contains(i.toShort)) yield s(i.toShort)
-        if (speeds.nonEmpty) {
-          (XWaySegDirMinute(key.xWay, key.segment, key.direction, minute), speeds.sum / speeds.length)
-        } else {
-          (XWaySegDirMinute(key.xWay, key.segment, key.direction, minute), 0.0)
-        }
+        Map[Int, Float](minute -> newAvg) ++ s
       case None =>
         // first minute of simulation, thus no LAV exists
-        val newMap = collection.immutable.Map[Int, Double](minute -> speed)
-        state.update(newMap)
-        (XWaySegDirMinute(key.xWay, key.segment, key.direction, minute), 0.0)
+        Map[Int, Float](minute -> speed)
+    }
+
+    state.update(newMap)
+
+    val speeds = for (i <- minute-5 until minute if i > 0 && newMap.contains(i)) yield newMap(i)
+    if (speeds.nonEmpty) {
+      (XWaySegDirMinute(key.xWay, key.segment, key.direction, minute), math.round(speeds.sum / speeds.length))
+    } else {
+      (XWaySegDirMinute(key.xWay, key.segment, key.direction, minute), 0)
     }
 
   }
@@ -214,5 +215,63 @@ object TrafficAnalytics {
     })
     .mapWithState(state)
   }*/
+
+  def updateNOV(key:XwayDir, value:Option[VehicleInformation], state:State[Map[Int, Array[Int]]]):(XwayDir, Int) = {
+
+    val currentState = state.getOption().getOrElse(Map())
+    val info = value.get
+    val minute = info.report.time/60+1
+    val segment = info.report.segment
+
+
+    val newState = state.getOption() match {
+      case Some(s) => s
+      case None =>
+        val arr = Array.fill[Int](100)(0)
+        Map[Int, Array[Int]](minute -> arr)
+    }
+
+
+    if (info.isCrossing) {
+      // vehicle entered new segment -> thus we have to increment the counter
+        val updated = if (newState.contains(minute)) {
+          val segments = newState(minute)
+          segments(segment) += 1
+          newState
+        } else {
+          val arr = Array.fill[Int](100)(0)
+          arr(segment) += 1
+          newState ++ Map[Int, Array[Int]](minute -> arr)
+        }
+      state.update(updated)
+    }
+
+    val s = state.getOption().getOrElse(Map())
+    (key, s(minute)(segment))
+
+  }
+
+  def updateNOV2(key:XwaySegDir, value:Option[(Int, Int)], state:State[Map[Int, Int]]):(XWaySegDirMinute, Int) = {
+
+    val minute = value.get._1
+    val count = value.get._2
+
+    val newState = state.getOption() match {
+      case Some(s) => if (s.contains(minute)) {
+        val newCount = s(minute) + count
+        s ++ Map(minute -> newCount)
+      } else {
+        s ++ Map(minute -> count)
+      }
+      case None => Map(minute -> count)
+    }
+
+    state.update(newState)
+
+    val NOVinPreviousMinute = newState.getOrElse(minute - 1, 0)
+
+    (XWaySegDirMinute(key.xWay, key.segment, key.direction, minute), NOVinPreviousMinute)
+
+  }
 
 }

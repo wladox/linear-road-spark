@@ -8,10 +8,10 @@ object SegmentAnalytics {
 
   case class SegmentStatistics(numberOfVehicles:Int, sumOfSpeeds:Double, accidentExists:Boolean, toll:Double)
 
-  def update(accidents: DStream[(TrafficAnalytics.XWaySegDirMinute, Boolean)],
-             numberOfVehicles: DStream[(TrafficAnalytics.XWaySegDirMinute, Int)],
-             avgVelocitiesPerMinute: MapWithStateDStream[TrafficAnalytics.XWaySegDirMinute, (Double, Int), (Double, Int),
-               (TrafficAnalytics.XWaySegDirMinute, Double)]):MapWithStateDStream[XwaySegDir, (Short, Boolean, Int, Double),
+  def update(accidents: DStream[(XWaySegDirMinute, Boolean)],
+             numberOfVehicles: DStream[(XWaySegDirMinute, Int)],
+             avgVelocitiesPerMinute: MapWithStateDStream[XWaySegDirMinute, (Double, Int), (Double, Int),
+               (XWaySegDirMinute, Double)]):MapWithStateDStream[XwaySegDir, (Short, Boolean, Int, Double),
     Map[Short, SegmentStatistics], (XwaySegDir, SegmentStatistics)] = {
 
     val segmentState = StateSpec.function(updateTolls _)

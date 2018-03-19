@@ -8,14 +8,14 @@ case class Event(
                   typ:Int,
                   time:Int,
                   vid:Int,
-                  speed:Double,
-                  xWay:Short,
-                  lane:Byte,
-                  direction:Byte,
-                  segment:Byte,
+                  speed:Float,
+                  xWay:Int,
+                  lane:Int,
+                  direction:Int,
+                  segment:Int,
                   position:Int,
                   qid:Int,
-                  day:Short,
+                  day:Int,
                   internalTime:Long
 ) extends Serializable{
 

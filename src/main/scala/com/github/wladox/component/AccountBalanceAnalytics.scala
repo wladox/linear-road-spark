@@ -17,14 +17,14 @@ object AccountBalanceAnalytics {
     * @param state - account balance
     * @return Toll notification for the new segment
     */
-  def update(vid:Int, value:Option[(Double, Double)], state:State[Double]):TollNotification = {
-    val toll = state.getOption().getOrElse(0.0)
-    val prevToll = value.get._1
-    val newToll = value.get._1
-    state.update(toll + prevToll)
-
-    TollNotification(vid, -1, System.currentTimeMillis(), -1, newToll)
-  }
+//  def update(vid:Int, value:Option[(Double, Double)], state:State[Double]):TollNotification = {
+//    val toll = state.getOption().getOrElse(0.0)
+//    val prevToll = value.get._1
+//    val newToll = value.get._1
+//    state.update(toll + prevToll)
+//
+//    TollNotification(vid, -1, System.currentTimeMillis(), -1, newToll)
+//  }
 
 
 }
