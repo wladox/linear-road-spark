@@ -61,7 +61,7 @@ object VehicleStatistics {
   }
 
   def positionChanged(r1:PositionReport, r2:PositionReport):Boolean = {
-    r1.xWay == r2.xWay && r1.position == r2.position && r1.direction == r2.direction
+    r1.position == r2.position && r1.lane == r2.lane
   }
 
   /**

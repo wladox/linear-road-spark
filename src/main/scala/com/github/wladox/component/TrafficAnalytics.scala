@@ -137,7 +137,7 @@ object TrafficAnalytics {
     * @param state
     * @return
     */
-  def spdSumPerMinute(key:XWaySegDirMinute, value:Option[Float], state:State[Float]):(XWaySegDirMinute, Float) = {
+  def spdSumPerMinute(key:XWaySegDirMinute, value:Option[Int], state:State[Int]):(XWaySegDirMinute, Int) = {
 
     val newState = state.getOption() match {
       case Some(s) => s + value.get
@@ -155,29 +155,29 @@ object TrafficAnalytics {
     * @param state
     * @return
     */
-  def lav(key:XwaySegDir, value:Option[(Short, Float)], state:State[Map[Short, Float]]):(XWaySegDirMinute, Int) = {
+  def lav(key:XwaySegDir, value:Option[(Short, Int, Int)], state:State[Map[Short, (Int,Int)]]):(XWaySegDirMinute, Int) = {
 
-    val minute = value.get._1
-    val speed = value.get._2
+    val minute  = value.get._1
+    val speed   = value.get._2
+    val count   = value.get._3
 
     val newMap = state.getOption() match {
       case Some(s) =>
-        val newAvg = if (s.contains(minute)) {
-          s(minute) + speed
-        } else {
-          speed
-        }
-        Map[Short, Float](minute -> newAvg) ++ s
+        s ++ Map[Short, (Int,Int)](minute -> (speed, count))
       case None =>
         // first minute of simulation, thus no LAV exists
-        Map[Short, Float](minute -> speed)
+        Map[Short, (Int,Int)](minute -> (speed, count))
     }
 
     state.update(newMap)
 
-    val speeds = for (i <- minute-5 until minute if i > 0 && newMap.contains(i.toShort)) yield newMap(i.toShort)
-    if (speeds.nonEmpty) {
-      (XWaySegDirMinute(key.xWay, key.segment, key.direction, minute), math.round(speeds.sum / speeds.length))
+    val statistics = for (i <- minute-5 until minute if i > 0 && newMap.contains(i.toShort)) yield newMap(i.toShort)
+
+    if (statistics.nonEmpty) {
+
+      val lav = statistics.foldLeft((0, 0)) { case ((t1speed, t1count), (t2speed, t2count)) => (t1speed + t2speed, t1count + t2count) }
+
+      (XWaySegDirMinute(key.xWay, key.segment, key.direction, minute), math.round(lav._1/lav._2.toFloat))
     } else {
       (XWaySegDirMinute(key.xWay, key.segment, key.direction, minute), 0)
     }

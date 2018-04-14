@@ -8,7 +8,7 @@ case class Event(
                   typ:Int,
                   time:Short,
                   vid:Int,
-                  speed:Float,
+                  speed:Int,
                   xWay:Byte,
                   lane:Byte,
                   direction:Byte,

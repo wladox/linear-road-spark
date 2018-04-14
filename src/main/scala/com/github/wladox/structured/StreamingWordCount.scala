@@ -169,7 +169,7 @@ object StreamingWordCount {
     Event(array(0).toShort,
       array(1).toShort,
       array(2).toInt,
-      array(3).toFloat,
+      array(3).toInt,
       array(4).toByte,
       array(5).toByte,
       array(6).toByte,
