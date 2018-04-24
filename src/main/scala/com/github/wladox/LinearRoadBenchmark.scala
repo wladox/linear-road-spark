@@ -9,8 +9,8 @@ import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, Produce
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.streaming.kafka010.{ConsumerStrategies, KafkaUtils, LocationStrategies}
-import org.apache.spark.streaming.{Milliseconds, Minutes, Seconds, State, StateSpec, StreamingContext}
-import org.apache.spark.{HashPartitioner, SparkConf, SparkContext}
+import org.apache.spark.streaming.{Seconds, State, StateSpec, StreamingContext}
+import org.apache.spark.{SparkConf, SparkContext}
 
 /**
   * This is the entry point for the benchmark application.
@@ -70,7 +70,6 @@ object LinearRoadBenchmark {
     val ssc = StreamingContext.getOrCreate(checkpointDir, () => functionToCreateContext(host, port, checkpointDir))
 
     val groupId = "linear-road-app-"+System.currentTimeMillis().toString
-    val suffix = "200"
 
     // configure kafka consumer
     val kafkaParams = Map[String, Object](
@@ -78,7 +77,7 @@ object LinearRoadBenchmark {
       "key.deserializer" -> classOf[StringDeserializer],
       "value.deserializer" -> classOf[StringDeserializer],
       "group.id" -> groupId,
-      "auto.offset.reset" -> "earliest",
+      "auto.offset.reset" -> "latest",
       "enable.auto.commit" -> (false: java.lang.Boolean)
     )
 
@@ -114,14 +113,14 @@ object LinearRoadBenchmark {
 
 
     // ##################### DAILY EXPENDITURES ######################
-    events
+    val daily = events
       .filter(_.typ == 3)
       .map(e => {
         val tolls = historyMap.value((e.vid, e.xWay))
         val emit = math.round((System.currentTimeMillis() - e.internalTime)/1000f)
         s"3,${e.time},$emit,${e.qid},${tolls(e.day-1)}"
       })
-      .foreachRDD(rdd => {
+      /*.foreachRDD(rdd => {
         rdd.foreachPartition(partition => {
           if (partition.nonEmpty) {
             val kafkaOpTopic = "type-3-output-200"
@@ -135,7 +134,7 @@ object LinearRoadBenchmark {
             producer.close()
           }
         })
-      })
+      })*/
 
     val positionReports = events
       .filter(_.typ == 0)
@@ -168,14 +167,14 @@ object LinearRoadBenchmark {
       // TODO improve processing time
 
 
-    accidents
+    val accidentAlerts = accidents
       .filter(v => v._2._1.isCrossing && v._2._1.report.lane != 4 &&  v._2._2 != -1)
       .map(r => {
         val time = r._2._1.report.time
         val emit = math.round((System.currentTimeMillis() - r._2._1.report.internalTime)/1000f)
         s"1,$time,$emit,${r._1.xWay},${r._2._2},${r._1.dir},${r._2._1.report.vid}"
       })
-      .foreachRDD(rdd => {
+      /*.foreachRDD(rdd => {
         rdd.foreachPartition(partition => {
           val props = producerParams.value
           val producer = new KafkaProducer[String,String](props)
@@ -185,7 +184,7 @@ object LinearRoadBenchmark {
           })
           producer.close()
         })
-      })
+      })*/
 
 
     // ##################### NUMBER OF VEHICLES LOGIC ######################
@@ -194,8 +193,7 @@ object LinearRoadBenchmark {
       .map(r => (XWaySegDirMinute(r._2.report.xWay, r._2.report.segment, r._2.report.direction, (r._2.report.time/60+1).toShort), if (r._2.isCrossing) 1 else 0))
       .reduceByKey((r1, r2) => r1 + r2)
       .map(r => (XwaySegDir(r._1.xWay, r._1.seg, r._1.dir), (r._1.minute, r._2)))
-      .mapWithState(StateSpec.function(TrafficAnalytics.updateNOV2 _))        // TODO improve processing time
-      .checkpoint(Seconds(6))
+      .mapWithState(StateSpec.function(TrafficAnalytics.updateNOV2 _))
 
     // ##################### AVERAGE VELOCITY LOGIC ######################
 
@@ -212,7 +210,6 @@ object LinearRoadBenchmark {
       .filter(_.isDefined)
       .map(_.get)// TODO improve processing time
       .mapWithState(StateSpec.function(TrafficAnalytics.lav _))
-      .checkpoint(Seconds(6))
 
     /*val avgVelocities = reports
       .join(velocities)
@@ -238,7 +235,7 @@ object LinearRoadBenchmark {
 
         ((info.report.vid, info.report.xWay), s"notify,${info.report.time},$emit,$lav,$toll,$lane,$isCrossing")
         //(info.report.vid, r._2._1._1.report.time, -1, lav, toll)
-      })
+      })//.checkpoint(Seconds(4))
 
     // ##################### ACCOUNT BALANCE REQUESTS ######################
     val accRequests = events
@@ -249,13 +246,15 @@ object LinearRoadBenchmark {
       .union(accRequests)
       .mapWithState(StateSpec.function(processToll _))
       .filter(r => r.isDefined)
+      .map(_.get)
+      .union(accidentAlerts).union(daily)
       .foreachRDD(rdd => {
         rdd.foreachPartition(partition => {
           val props = producerParams.value
           val producer = new KafkaProducer[String,String](props)
           partition.foreach( record => {
-            val data = record.get
-            val message = new ProducerRecord[String, String]("type-0-output-200", null, data)
+            val data = record
+            val message = new ProducerRecord[String, String]("output-1L", null, data)
             producer.send(message)
           } )
           producer.close()
