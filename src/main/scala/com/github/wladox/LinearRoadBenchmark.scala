@@ -2,15 +2,15 @@ package com.github.wladox
 
 import java.util
 
-import com.github.wladox.component.{TrafficAnalytics, VehicleStatistics, XWaySegDirMinute}
+import com.github.wladox.component.{TrafficAnalytics, VehicleInformation, VehicleStatistics, XWaySegDirMinute}
 import com.github.wladox.model.{Event, PositionReport, XwaySegDir}
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.serialization.StringDeserializer
+import org.apache.spark.storage.StorageLevel
 import org.apache.spark.streaming.kafka010.{ConsumerStrategies, KafkaUtils, LocationStrategies}
-import org.apache.spark.streaming.{Milliseconds, State, StateSpec, StreamingContext}
-import org.apache.spark.util.LongAccumulator
-import org.apache.spark.{SparkConf, SparkContext}
+import org.apache.spark.streaming.{Milliseconds, Minutes, Seconds, State, StateSpec, StreamingContext}
+import org.apache.spark.{HashPartitioner, SparkConf, SparkContext}
 
 /**
   * This is the entry point for the benchmark application.
@@ -30,20 +30,24 @@ object LinearRoadBenchmark {
   case class XwayDir(xWay:Byte, dir:Byte)
   case class VehicleDayXway(vid:Int, day:Short, xWay:Short)
 
-  def functionToCreateContext(host: String, port: Int, outputPath: String, checkpointDirectory: String): StreamingContext = {
+  def functionToCreateContext(host: String, port: Int, checkpointDirectory: String): StreamingContext = {
 
     val conf = new SparkConf()
-      .setMaster("spark://"+host+":"+port) // use always "local[n]" locally where n is # of cores; host+":"+port otherwise
-      //.setMaster("local[*]")
+      //.setMaster("spark://"+host+":"+port) // use always "local[n]" locally where n is # of cores; host+":"+port otherwise
+      .setMaster("local[*]")
       .setAppName("Linear Road Benchmark")
-      .set("spark.driver.memory", "4g")
-      //.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+      .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+      .set("spark.executor.memory", "2g")
       //.set("spark.kryo.registrationRequired", "false") // https://issues.apache.org/jira/browse/SPARK-12591
       //.set("spark.streaming.blockInterval", "1000ms")
       //.set("spark.memory.fraction", "0.3")
 
+    conf.registerKryoClasses(
+      Array(classOf[Event], classOf[PositionReport], classOf[VehicleInformation], classOf[XwayDir], classOf[XWaySegDirMinute], classOf[XwaySegDir])
+    )
+
     val sc  = new SparkContext(conf)
-    val ssc = new StreamingContext(sc, Milliseconds(1000))
+    val ssc = new StreamingContext(sc, Seconds(2))
 
     ssc.checkpoint(checkpointDirectory)
     ssc
@@ -52,39 +56,28 @@ object LinearRoadBenchmark {
   def main(args: Array[String]): Unit = {
 
     if (args.length != 6) {
-      System.err.println("Usage: LinearRoadBenchmark <hostname> <port> <output> <checkpointDir> <topic> <tollHistory>")
+      System.err.println("Usage: LinearRoadBenchmark <hostname> <port> <checkpointDir> <topic> <tollHistory> <kafka.broker>")
       System.exit(1)
     }
 
     val host          = args(0)
     val port          = args(1).toInt
-    val output        = args(2)
-    val checkpointDir = args(3)
-    val topic         = args(4)
-    val history       = args(5)
+    val checkpointDir = args(2)
+    val topic         = args(3)
+    val history       = args(4)
+    val broker        = args(5)
 
-    val ssc = StreamingContext.getOrCreate(checkpointDir, () => functionToCreateContext(host, port, output, checkpointDir))
+    val ssc = StreamingContext.getOrCreate(checkpointDir, () => functionToCreateContext(host, port, checkpointDir))
 
-    val historicalTolls = ssc.sparkContext.textFile(history)
-      .map(r => {
-        val arr = r.split(",")
-        ((arr(0).toInt, arr(2).toByte), arr(3).toByte)
-      })
-      .groupByKey
-      .mapValues(_.toArray)
-      .cache()
-      //.persist(StorageLevel.MEMORY_ONLY_SER)
-
-    //val broadcast = ssc.sparkContext.broadcast(history)
-    //println(broadcast.value.size)
-
+    val groupId = "linear-road-app-"+System.currentTimeMillis().toString
+    val suffix = "200"
 
     // configure kafka consumer
     val kafkaParams = Map[String, Object](
-      "bootstrap.servers" -> "localhost:9092",
+      "bootstrap.servers" -> broker,
       "key.deserializer" -> classOf[StringDeserializer],
       "value.deserializer" -> classOf[StringDeserializer],
-      "group.id" -> "linear-road-app",
+      "group.id" -> groupId,
       "auto.offset.reset" -> "earliest",
       "enable.auto.commit" -> (false: java.lang.Boolean)
     )
@@ -96,46 +89,51 @@ object LinearRoadBenchmark {
         kafkaParams)
       )
 
+    val props = new util.HashMap[String, Object]()
+    props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, broker)
+    props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer")
+    props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer")
+
+    val producerParams = ssc.sparkContext.broadcast(props)
+
+    val historicalTolls = ssc.sparkContext.textFile(history)
+      .map(r => {
+        val arr = r.split(",")
+        ((arr(0).toInt, arr(2).toByte), arr(3).toByte)
+      })
+      .groupByKey()
+      .mapValues(_.toArray)
+      .collectAsMap()
+
+    val historyMap = ssc.sparkContext.broadcast(historicalTolls)
+
     val events = streams
-      .filter(_.value().trim().nonEmpty) //0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 -> stop
+      .filter(v => v.value().trim().nonEmpty && !v.value().equals("0,0,0,0,0,0,0,0,0,0,0,0,0,0,0"))
       .map(deserializeEvent)
+      .cache()
 
 
     // ##################### DAILY EXPENDITURES ######################
-    val daily = events
+    events
       .filter(_.typ == 3)
       .map(e => {
-        ((e.vid,e.xWay), (e.qid, e.day, e.time, e.internalTime))
+        val tolls = historyMap.value((e.vid, e.xWay))
+        val emit = math.round((System.currentTimeMillis() - e.internalTime)/1000f)
+        s"3,${e.time},$emit,${e.qid},${tolls(e.day-1)}"
       })
-      .transform(
-        requests => {
-          requests.join(historicalTolls).map(r => {
-            val qid   = r._2._1._1
-            val time = r._2._1._3
-            val emit = math.round((System.currentTimeMillis() - r._2._1._4)/1000f)
-            val state = r._2._2
-            s"3,$time,$emit,$qid,${state(r._2._1._2-1)}"
-          })
-        })
       .foreachRDD(rdd => {
         rdd.foreachPartition(partition => {
-          // Print statements in this section are shown in the executor's stdout logs
-          val kafkaOpTopic = "type-3-output"
-          val props = new util.HashMap[String, Object]()
-
-          props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092")
-          props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer")
-          props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer")
-
-          val producer = new KafkaProducer[String,String](props)
-          partition.foreach( record => {
-            val data = record.toString
-            // As as debugging technique, users can write to DBFS to verify that records are being written out
-            // dbutils.fs.put("/tmp/test_kafka_output",data,true)
-            val message = new ProducerRecord[String, String](kafkaOpTopic, null, data)
-            producer.send(message)
-          } )
-          producer.close()
+          if (partition.nonEmpty) {
+            val kafkaOpTopic = "type-3-output-200"
+            val props = producerParams.value
+            val producer = new KafkaProducer[String,String](props)
+            partition.foreach( record => {
+              val data = record.toString
+              val message = new ProducerRecord[String, String](kafkaOpTopic, null, data)
+              producer.send(message)
+            } )
+            producer.close()
+          }
         })
       })
 
@@ -146,6 +144,8 @@ object LinearRoadBenchmark {
 
     val vehicleStats = positionReports
       .mapWithState(StateSpec.function(VehicleStatistics.updateLastReport _))
+      .persist(StorageLevel.MEMORY_ONLY)
+
         /*.foreachRDD(r => {
           println("*** got an RDD, size = " + r.count())
 
@@ -165,32 +165,24 @@ object LinearRoadBenchmark {
       .map(t => (XwayDir(t._2.report.xWay, t._2.report.direction), t._2))
       .mapWithState(StateSpec.function(VehicleStatistics.updateStoppedVehicles _))
       .mapWithState(StateSpec.function(VehicleStatistics.updateAccidents _))
+      // TODO improve processing time
+
 
     accidents
-      .filter(v => v._2._1.report.lane != 4 &&  v._2._2 != -1)
+      .filter(v => v._2._1.isCrossing && v._2._1.report.lane != 4 &&  v._2._2 != -1)
       .map(r => {
         val time = r._2._1.report.time
         val emit = math.round((System.currentTimeMillis() - r._2._1.report.internalTime)/1000f)
-        s"1,$time,$emit,${r._1.xWay}.${r._2._2}.${r._1.dir}.${r._2._1.report.vid}"
+        s"1,$time,$emit,${r._1.xWay},${r._2._2},${r._1.dir},${r._2._1.report.vid}"
       })
       .foreachRDD(rdd => {
         rdd.foreachPartition(partition => {
-          // Print statements in this section are shown in the executor's stdout logs
-          val kafkaOpTopic = "type-1-output"
-          val props = new util.HashMap[String, Object]()
-
-          props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092")
-          props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer")
-          props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer")
-
+          val props = producerParams.value
           val producer = new KafkaProducer[String,String](props)
-          partition.foreach( record => {
-            val data = record.toString
-            // As as debugging technique, users can write to DBFS to verify that records are being written out
-            // dbutils.fs.put("/tmp/test_kafka_output",data,true)
-            val message = new ProducerRecord[String, String](kafkaOpTopic, null, data)
+          partition.foreach(record => {
+            val message = new ProducerRecord[String, String]("type-1-output-200", null, record)
             producer.send(message)
-          } )
+          })
           producer.close()
         })
       })
@@ -198,47 +190,48 @@ object LinearRoadBenchmark {
 
     // ##################### NUMBER OF VEHICLES LOGIC ######################
 
-    //val positionReportCount = StateSpec.function(TrafficAnalytics.updateNOV _)
-
-    val nov = vehicleStats
+    val NOV = vehicleStats
       .map(r => (XWaySegDirMinute(r._2.report.xWay, r._2.report.segment, r._2.report.direction, (r._2.report.time/60+1).toShort), if (r._2.isCrossing) 1 else 0))
       .reduceByKey((r1, r2) => r1 + r2)
       .map(r => (XwaySegDir(r._1.xWay, r._1.seg, r._1.dir), (r._1.minute, r._2)))
-      .mapWithState(StateSpec.function(TrafficAnalytics.updateNOV2 _))
-
+      .mapWithState(StateSpec.function(TrafficAnalytics.updateNOV2 _))        // TODO improve processing time
+      .checkpoint(Seconds(6))
 
     // ##################### AVERAGE VELOCITY LOGIC ######################
 
-    val reports = positionReports
+    /*val reports = positionReports
       .map(r => (XWaySegDirMinute(r._2.xWay, r._2.segment, r._2.direction, (r._2.time/60+1).toShort), 1))
       .reduceByKey((r1, r2) => r1 + r2)
-      .mapWithState(StateSpec.function(TrafficAnalytics.vehicleCount _))
+      .mapWithState(StateSpec.function(TrafficAnalytics.vehicleCount _))*/
 
-    val velocities = positionReports
-      .map(r => (XWaySegDirMinute(r._2.xWay, r._2.segment, r._2.direction, (r._2.time/60+1).toShort), r._2.speed))
-      .reduceByKey((r1, r2) => r1 + r2)
-      .mapWithState(StateSpec.function(TrafficAnalytics.spdSumPerMinute _))
 
-    val avgVelocities = reports
-      .join(velocities)
-      .map(r => {
-        (XwaySegDir(r._1.xWay, r._1.seg, r._1.dir), (r._1.minute , r._2._2, r._2._1))  // AVG per minute
-      })
+    val LAV = positionReports
+      .map(r => (XWaySegDirMinute(r._2.xWay, r._2.segment, r._2.direction, (r._2.time/60+1).toShort), (1, r._2.speed)))
+      .reduceByKey((r1, r2) => (r1._1 + r2._1, r1._2 + r2._2))
+      .mapWithState(StateSpec.function(TrafficAnalytics.spdSumPerMinute _).timeout(Seconds(120)))
+      .filter(_.isDefined)
+      .map(_.get)// TODO improve processing time
       .mapWithState(StateSpec.function(TrafficAnalytics.lav _))
+      .checkpoint(Seconds(6))
 
-    val segmentStats = avgVelocities.join(nov)
+    /*val avgVelocities = reports
+      .join(velocities)
+      .map(r => (XwaySegDir(r._1.xWay, r._1.seg, r._1.dir), (r._1.minute , r._2._2, r._2._1)))
+      .mapWithState(StateSpec.function(TrafficAnalytics.lav _))    */           // TODO improve processing time
 
-    val tolls = accidents
-      .join(segmentStats)
-      //.filter(r => r._2._1._1.isCrossing && r._2._1._1.report.lane != 4)
+
+    val tolls = accidents.join(LAV).join(NOV)
       .map(r => {
-        val info = r._2._1._1
-        val isAccident = r._2._1._2 != -1
-        val lav = r._2._2._1
-        val nov = r._2._2._2
+
+        val info = r._2._1._1._1
+        val isAccident = r._2._1._1._2 != -1
+
+        val lav = r._2._1._2
+        val nov = r._2._2
+
         val toll = calculateToll(lav, nov, isAccident)
-        val lane = r._2._1._1.report.lane
-        val isCrossing = r._2._1._1.isCrossing
+        val lane = info.report.lane
+        val isCrossing = info.isCrossing
         val emit = math.round((System.currentTimeMillis() - info.report.internalTime)/1000f)
 
         //val action = if (info.report.lane != 4) "update" else "reset"
@@ -250,36 +243,25 @@ object LinearRoadBenchmark {
     // ##################### ACCOUNT BALANCE REQUESTS ######################
     val accRequests = events
       .filter(_.typ == 2)
-      .map(e => ((e.vid, e.xWay), "get,"+e.time+","+e.internalTime+","+e.qid))
+      .map(e => ((e.vid, e.xWay), s"get,${e.time},${e.internalTime},${e.qid}"))
 
-    val tollAssessment = tolls
+    tolls
       .union(accRequests)
       .mapWithState(StateSpec.function(processToll _))
       .filter(r => r.isDefined)
       .foreachRDD(rdd => {
         rdd.foreachPartition(partition => {
-          // Print statements in this section are shown in the executor's stdout logs
-          val kafkaOpTopic = "type-0-output"
-          val props = new util.HashMap[String, Object]()
-
-          props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092")
-          props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer")
-          props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer")
-
+          val props = producerParams.value
           val producer = new KafkaProducer[String,String](props)
           partition.foreach( record => {
             val data = record.get
-            // As as debugging technique, users can write to DBFS to verify that records are being written out
-            // dbutils.fs.put("/tmp/test_kafka_output",data,true)
-            val message = new ProducerRecord[String, String](kafkaOpTopic, null, data)
+            val message = new ProducerRecord[String, String]("type-0-output-200", null, data)
             producer.send(message)
           } )
           producer.close()
         })
       })
 
-
-//    segmentStatistics.checkpoint(Seconds(5))
 
     ssc.start()
     ssc.awaitTermination()

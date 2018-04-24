@@ -133,45 +133,58 @@ object TrafficAnalytics {
     * Updates sum of vehicle speeds per minute.
     *
     * @param key XWaySegDirMinute
-    * @param value
-    * @param state
+    * @param value Amount of emitted reports in the batch, Sum of all speeds in the batch
+    * @param state Sum of all emitted reports, Sum of all speeds
     * @return
     */
-  def spdSumPerMinute(key:XWaySegDirMinute, value:Option[Int], state:State[Int]):(XWaySegDirMinute, Int) = {
+  def spdSumPerMinute(key:XWaySegDirMinute, value:Option[(Int, Int)], state:State[(Int, Int)]):Option[(XwaySegDir, (Short, Int, Int))] = {
 
-    val newState = state.getOption() match {
-      case Some(s) => s + value.get
-      case None => value.get
+    def updateSegmentStatistics(tuple:(Int,Int)):Option[(XwaySegDir, (Short, Int, Int))] = {
+      val newState = state.getOption() match {
+        case Some(s) => (s._1 + tuple._1, s._2 + tuple._2)
+        case None => value.get
+      }
+      state.update(newState)
+      Some(XwaySegDir(key.xWay, key.seg, key.dir), (key.minute, newState._1, newState._2))
     }
-    state.update(newState)
-    (XWaySegDirMinute(key.xWay, key.seg, key.dir, key.minute), newState)
+
+    value match {
+      case Some(v) => updateSegmentStatistics(v)
+      case _ if state.isTimingOut() => None
+    }
+
   }
 
   /**
     * Lates average velocity
     *
     * @param key
-    * @param value
-    * @param state
+    * @param value (Minute, Count, Speed)
+    * @param state Map(Minute -> (Speed, Count)
     * @return
     */
-  def lav(key:XwaySegDir, value:Option[(Short, Int, Int)], state:State[Map[Short, (Int,Int)]]):(XWaySegDirMinute, Int) = {
+  def lav(key:XwaySegDir, value:Option[(Short, Int, Int)], state:State[Array[(Int,Int)]]):(XWaySegDirMinute, Int) = {
 
     val minute  = value.get._1
-    val speed   = value.get._2
-    val count   = value.get._3
+    val count   = value.get._2
+    val speed   = value.get._3
 
-    val newMap = state.getOption() match {
+    val newState = state.getOption() match {
       case Some(s) =>
-        s ++ Map[Short, (Int,Int)](minute -> (speed, count))
+        val old = s(minute)
+        s(minute) = (old._1 + speed, old._2 + count)
+        s
       case None =>
         // first minute of simulation, thus no LAV exists
-        Map[Short, (Int,Int)](minute -> (speed, count))
+        val arr = Array.fill(181)((0,0))
+        arr(minute) = (speed, count)
+        arr
+        //Map[Short, (Int,Int)](minute -> (speed, count))
     }
 
-    state.update(newMap)
+    state.update(newState)
 
-    val statistics = for (i <- minute-5 until minute if i > 0 && newMap.contains(i.toShort)) yield newMap(i.toShort)
+    val statistics = for (i <- minute-5 until minute if i > 0) yield newState(i)
 
     if (statistics.nonEmpty) {
 

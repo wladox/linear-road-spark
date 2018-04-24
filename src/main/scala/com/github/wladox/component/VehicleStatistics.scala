@@ -5,7 +5,9 @@ import com.github.wladox.model.PositionReport
 import org.apache.spark.streaming.State
 
 case class VehicleInformation(report:PositionReport, isStopped:Boolean, isCrossing:Boolean, lastLane:Byte, lastPosition:Int)
-case class Accident(time:Int, clearTime:Int, accidentCars:Set[Int])
+case class Accident(time:Int, clearTime:Int, accidentCars:Set[Int]) {
+  override def toString: String = s"$time,$clearTime,$accidentCars"
+}
 
 object VehicleStatistics {
 
@@ -148,6 +150,7 @@ object VehicleStatistics {
         } else {
           // there is no accident stored for the given segment, so create new
           val accident = Accident(minute, -1, Set(vid))
+          print("ACCIDENT: " + accident)
           val newState = accidents ++ Map(segment -> accident)
           state.update(newState)
         }
@@ -161,11 +164,18 @@ object VehicleStatistics {
       val lastSegment = (car.lastPosition/5280).toByte
       if (accidents.contains(lastSegment)) {
         val cleared = clearAccident(car.report, accidents(lastSegment))
-        val newState = accidents ++ Map(lastSegment -> cleared)
+        val newState = cleared match {
+          case Some(a) => accidents ++ Map(lastSegment -> a)
+          case None => accidents
+        }
+
         state.update(newState)
       } else if (accidents.contains(segment)) {
         val cleared = clearAccident(car.report, accidents(segment))
-        val newState = accidents ++ Map(lastSegment -> cleared)
+        val newState = cleared match {
+          case Some(a) => accidents ++ Map(segment -> a)
+          case None => accidents
+        }
         state.update(newState)
       }
     }
@@ -186,23 +196,26 @@ object VehicleStatistics {
     // if values > -1 are found, check if one of them is smaller than the current minute
     // if yes, then there is accident detected else
 
-    val segm = findAccident(minute.toShort, range) match {
+    val segm:Byte = findAccident(minute.toShort, range) match {
       case Some(res) => res._1
       case None => -1
     }
 
-    (XWaySegDirMinute(key.xWay, car.report.segment, key.dir, minute.toShort),(car, segm.toByte))
+    if (segm != -1)
+      print("Accident proximity " + segm)
+
+    (XWaySegDirMinute(key.xWay, car.report.segment, key.dir, minute.toShort),(car, segm))
   }
 
-  def findAccident(minute:Short, m:Map[Byte, Accident]):Option[(Byte, Accident)] = {
-    m.find(t => {
-      (t._2.time/60+1 < minute && t._2.clearTime == -1) || (t._2.time/60+1 < minute && minute < t._2.clearTime/60+1)
+  def findAccident(minute:Short, accidents:Map[Byte, Accident]):Option[(Byte, Accident)] = {
+    accidents.find(t => {
+      (t._2.time+1 <= minute && t._2.clearTime == -1) || (t._2.time+1 <= minute && minute <= t._2.clearTime)
     })
   }
 
-  def clearAccident(p:PositionReport, acc:Accident):Accident = {
+  def clearAccident(p:PositionReport, acc:Accident):Option[Accident] = {
     if (acc.accidentCars.contains(p.vid) && acc.clearTime == -1)
-      Accident(acc.time, p.time, acc.accidentCars)
-    acc
+      Some(Accident(acc.time, p.time/60+1, acc.accidentCars))
+    None
   }
 }
