@@ -269,6 +269,12 @@ object TrafficAnalytics {
     val minute = value.get._1
     val count = value.get._2
 
+    if (key.segment == 55 && key.direction == 0 && minute == 17)
+      System.out.print()
+
+    if (key.segment == 55 && key.direction == 0 && minute == 18)
+      System.out.print()
+
     val newState = state.getOption() match {
       case Some(s) => if (s.contains(minute)) {
         val newCount = s(minute) + count

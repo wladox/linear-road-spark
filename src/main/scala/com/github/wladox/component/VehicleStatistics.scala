@@ -23,16 +23,19 @@ object VehicleStatistics {
 
     val currentReport = value.get
 
+    /*if (currentReport.time.equals(2130) && (currentReport.vid.equals(2) || currentReport.vid.equals(4609)))
+      System.out.println("Accident cleared")
+
+    if (currentReport.time.equals(2160) && currentReport.vid.equals(7380))
+      System.out.println("Accident cleared")*/
+
     state.getOption() match {
       case Some(lastReport) =>
 
-        val equal = positionChanged(lastReport._1, currentReport)
-
-        val segmentCrossed = currentReport.segment != lastReport._1.segment
-
-        val newCounter    = if (equal) lastReport._2 + 1 else 1
-
-        val isStopped = newCounter >= 4
+        val equal           = positionChanged(lastReport._1, currentReport)
+        val segmentCrossed  = currentReport.segment != lastReport._1.segment || lastReport._1.lane == 4
+        val newCounter      = if (equal) lastReport._2 + 1 else 1
+        val isStopped       = newCounter >= 4
 
         val info = VehicleInformation(currentReport, isStopped, segmentCrossed, lastReport._1.lane, lastReport._1.position)
 
@@ -83,12 +86,15 @@ object VehicleStatistics {
 
     val s = state.getOption().getOrElse(Map())
 
+    if (vehicleInfo.report.time.equals(2130) && (vehicleInfo.report.vid.equals(4609) || vehicleInfo.report.vid.equals(2)))
+      System.out.println("Accident cleared")
+
     // if the vehicle is stopped, check if its VID is stored in the set of stopped vehicles on the given lane and position
     val newMap = if (isStopped) {
       // check if the map contains a set for the given lane and position
       // if there is a set, then add the VID to the set of stopped vehicles
       // otherwise create a new set with the given VID
-      val newSet = if (s.contains(mapKey))
+      val newSet = if (s.contains(mapKey)) //TODO avoid unnecessary addition to set
         s(mapKey) + vehicleInfo.report.vid
       else
         Set(vehicleInfo.report.vid)
@@ -135,6 +141,11 @@ object VehicleStatistics {
     // is greater than 1, then we need to create or update an accident
     // if there is no accident stored for the given segment create new accident
 
+    if (car.report.time.equals(2130) && (car.report.vid.equals(2) || car.report.vid.equals(4609)))
+      System.out.println("Time 2130 arrived")
+
+    if (car.report.time.equals(2160) && car.report.vid.equals(7380))
+      System.out.println("Time 2160 arrived")
     if (car.isStopped) {
       // there is an accident
       if (stoppedVehicles > 1) {
@@ -165,7 +176,9 @@ object VehicleStatistics {
       if (accidents.contains(lastSegment)) {
         val cleared = clearAccident(car.report, accidents(lastSegment))
         val newState = cleared match {
-          case Some(a) => accidents ++ Map(lastSegment -> a)
+          case Some(a) => {
+            accidents ++ Map(lastSegment -> a)
+          }
           case None => accidents
         }
 
@@ -173,7 +186,9 @@ object VehicleStatistics {
       } else if (accidents.contains(segment)) {
         val cleared = clearAccident(car.report, accidents(segment))
         val newState = cleared match {
-          case Some(a) => accidents ++ Map(segment -> a)
+          case Some(a) => {
+            accidents ++ Map(segment -> a)
+          }
           case None => accidents
         }
         state.update(newState)
@@ -215,7 +230,7 @@ object VehicleStatistics {
 
   def clearAccident(p:PositionReport, acc:Accident):Option[Accident] = {
     if (acc.accidentCars.contains(p.vid) && acc.clearTime == -1)
-      Some(Accident(acc.time, p.time/60+1, acc.accidentCars))
+      return Some(Accident(acc.time, p.time/60+1, acc.accidentCars))
     None
   }
 }
