@@ -2,49 +2,62 @@ package com.github.wladox
 
 import java.util
 
-import com.github.wladox.component.{TrafficAnalytics, VehicleInformation, VehicleStatistics, XWaySegDirMinute}
+import com.github.wladox.component.{TrafficAnalytics, VehicleStatistics, XWaySegDirMinute}
 import com.github.wladox.model.{Event, PositionReport, XwaySegDir}
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.serialization.StringDeserializer
-import org.apache.spark.storage.StorageLevel
+import org.apache.spark.streaming.StateSpec._
 import org.apache.spark.streaming.kafka010.{ConsumerStrategies, KafkaUtils, LocationStrategies}
 import org.apache.spark.streaming.{Seconds, State, StateSpec, StreamingContext}
-import org.apache.spark.{SparkConf, SparkContext}
+import org.apache.spark.{HashPartitioner, SparkConf, SparkContext}
+
+
+case class XwayDir(xWay:Int, dir:Int) {
+  def canEqual(a: Any): Boolean = a.isInstanceOf[XwayDir]
+
+  override def equals(that: Any): Boolean =
+    that match {
+      case that: XwayDir => that.canEqual(this) && this.hashCode == that.hashCode
+      case _ => false
+    }
+  override def hashCode: Int = {
+    val prime = 31
+    var result = 1
+    result = prime * result + xWay
+    result = prime * result + dir
+    result
+  }
+}
+case class TollNotification(vid:Int, time:Long, emit:Long, spd:Int, toll:Int) {
+  override def toString: String = s"0,$vid,$time,$emit,$spd,$toll"
+}
+case class TollHistory(vid:Int, day: Int, xWay: Int, toll:Int)
 
 /**
-  * This is the entry point for the benchmark application.
+  * The entry point to run the benchmark.
   */
 object LinearRoadBenchmark {
 
-  case class Accident(time:Int, xWay:Int, lane:Int, dir:Int, pos:Int) {
-    override def toString: String = s"[Accident: $xWay, $lane, $dir, $pos]"
-  }
-  case class TollNotification(vid:Int, time:Long, emit:Long, spd:Int, toll:Int) {
-    override def toString: String = s"0,$vid,$time,$emit,$spd,$toll"
-  }
-  case class DailyExpenditureReport(time:Long, emit:Long, qid:Int, bal:Int, day:Short) {
-    override def toString: String = s"3,$time,$emit,$qid,$bal"
-  }
-  case class TollHistory(vid:Int, day: Int, xWay: Int, toll:Int)
-  case class XwayDir(xWay:Byte, dir:Byte)
-  case class VehicleDayXway(vid:Int, day:Short, xWay:Short)
+  val POSITION_REPORT           = 0
+  val ACCOUNT_BALANCE_REQUEST   = 2
+  val DAILY_EXPENDITURE_REQUEST = 3
 
   def functionToCreateContext(host: String, port: Int, checkpointDirectory: String): StreamingContext = {
 
     val conf = new SparkConf()
       //.setMaster("spark://"+host+":"+port) // use always "local[n]" locally where n is # of cores; host+":"+port otherwise
       .setMaster("local[*]")
-      .setAppName("Linear Road Benchmark")
+      .setAppName("LinearRoadBenchmark")
       .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-      .set("spark.executor.memory", "4g")
+      //.set("spark.executor.memory", "4g")
       //.set("spark.default.parallelism", "1")
       //.set("spark.kryo.registrationRequired", "false") // https://issues.apache.org/jira/browse/SPARK-12591
       //.set("spark.streaming.blockInterval", "1000ms")
       //.set("spark.memory.fraction", "0.3")
 
     conf.registerKryoClasses(
-      Array(classOf[Event], classOf[PositionReport], classOf[VehicleInformation], classOf[XwayDir], classOf[XWaySegDirMinute], classOf[XwaySegDir])
+      Array(classOf[Event], classOf[PositionReport], classOf[XwayDir], classOf[XWaySegDirMinute], classOf[XwaySegDir])
     )
 
     val sc  = new SparkContext(conf)
@@ -56,21 +69,22 @@ object LinearRoadBenchmark {
 
   def main(args: Array[String]): Unit = {
 
-    if (args.length != 6) {
-      System.err.println("Usage: LinearRoadBenchmark <hostname> <port> <checkpointDir> <topic> <tollHistory> <kafka.broker>")
+    if (args.length < 7) {
+      System.err.println("Usage: LinearRoadBenchmark <hostname> <port> <checkpointDir> <inputTopic> <outputTopic> <tollHistory> <kafkaBroker>")
       System.exit(1)
     }
 
     val host          = args(0)
     val port          = args(1).toInt
     val checkpointDir = args(2)
-    val topic         = args(3)
-    val history       = args(4)
-    val broker        = args(5)
+    val inputTopic    = args(3)
+    val outputTopic   = args(4)
+    val history       = args(5)
+    val broker        = args(6)
+    val groupId       = "linear-road-app"
 
+    // create streaming context
     val ssc = StreamingContext.getOrCreate(checkpointDir, () => functionToCreateContext(host, port, checkpointDir))
-
-    val groupId = "linear-road-app-"+System.currentTimeMillis().toString
 
     // configure kafka consumer
     val kafkaParams = Map[String, Object](
@@ -82,13 +96,15 @@ object LinearRoadBenchmark {
       "enable.auto.commit" -> (false: java.lang.Boolean)
     )
 
+    // create direct stream
     val streams = KafkaUtils.createDirectStream(
         ssc,
         LocationStrategies.PreferConsistent,
-        ConsumerStrategies.Subscribe[String, String](Array(topic),
+        ConsumerStrategies.Subscribe[String, String](Array(inputTopic),
         kafkaParams)
       )
 
+    // create Kafka producer props and broadcast them to workers
     val props = new util.HashMap[String, Object]()
     props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, broker)
     props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer")
@@ -108,121 +124,97 @@ object LinearRoadBenchmark {
     val historyMap = ssc.sparkContext.broadcast(historicalTolls)
 
     val events = streams
-      .filter(v => v.value().trim().nonEmpty && !v.value().equals("0,0,0,0,0,0,0,0,0,0,0,0,0,0,0"))
+      .filter(v => v.value().trim().nonEmpty)
       .map(deserializeEvent)
       .cache()
 
 
-    // ##################### DAILY EXPENDITURES ######################
+    // ##################### DAILY EXPENDITURES RESPONSES ######################
     val daily = events
-      .filter(_.typ == 3)
+      .filter(_.typ == DAILY_EXPENDITURE_REQUEST)
       .map(e => {
         val tolls = historyMap.value((e.vid, e.xWay))
         val emit = math.round((System.currentTimeMillis() - e.internalTime)/1000f)
-        s"3,${e.time},$emit,${e.qid},${tolls(e.day-1)}"
+        s"3,${e.time},1,${e.qid},${tolls(e.day-1)}"
       })
 
     val positionReports = events
-      .filter(_.typ == 0)
+      .filter(e => e.typ == POSITION_REPORT)
       .map(toPositionReport)
+
+    // ##################### ACCIDENT DETECTION ######################
+
+    val accidents = positionReports
+      .mapWithState(function(VehicleStatistics.updateLastReport _))
+      .mapWithState(function(VehicleStatistics.updateStoppedVehicles _))
+      .mapWithState(function(VehicleStatistics.updateAccidents _))
+      //.foreachRDD(rdd => println("RDD size " + rdd.count()))
+
+
+    // ##################### ACCIDENT NOTIFICATION ######################
+    val accidentAlerts = accidents
+      .filter(v => v._2._1.isCrossing && v._2._1.lane != 4 &&  v._2._2 != -1)
+      .map(r => {
+        val time = r._2._1.time
+        val emit = math.round((System.currentTimeMillis() - r._2._1.internalTime)/1000f)
+        val report = r._2._1
+        s"1,$time,1,${report.xWay},${r._2._2},${report.direction},${report.vid}"
+      })
+
+    val keyedReports = positionReports
+      .map(r => (XwaySegDir(r._2.xWay, r._2.segment, r._2.direction), (r._2.vid, r._2.speed, r._2.time)))
       .cache()
 
-    val vehicleStats = positionReports
-      .mapWithState(StateSpec.function(VehicleStatistics.updateLastReport _))
-      .persist(StorageLevel.MEMORY_ONLY)
+    // ##################### NUMBER OF VEHICLES ######################
+    val NOV = keyedReports.mapWithState(function(TrafficAnalytics.updateNOV _))
 
-        /*.foreachRDD(r => {
-          println("*** got an RDD, size = " + r.count())
+    // ##################### AVERAGE VELOCITY ######################
+    val LAV = keyedReports.mapWithState(function(TrafficAnalytics.lav _))
 
-          r.partitioner match {
-            case Some(p) => println("+++ partitioner: " + r.partitioner.get.getClass.getName)
-            case None => println("+++ no partitioner")
-          }
+    // ##################### TOLL CALCULATION / NOTIFICATION ######################
+    val segmentStats = accidents.join(LAV).join(NOV).map(r => (r._1,(r._2._1._1._2, r._2._1._2, r._2._2, r._2._1._1._1.isCrossing)))
 
-          if (r.count() > 0) {
-            println("*** " + r.getNumPartitions + " partitions")
-          }
-        })*/
-
-    // ##################### ACCIDENT DETECTION LOGIC ######################
-
-    val accidents       = vehicleStats
-      .map(t => (XwayDir(t._2.report.xWay, t._2.report.direction), t._2))
-      .mapWithState(StateSpec.function(VehicleStatistics.updateStoppedVehicles _))
-      .mapWithState(StateSpec.function(VehicleStatistics.updateAccidents _))
-      // TODO improve processing time
-
-
-    val accidentAlerts = accidents
-      .filter(v => v._2._1.isCrossing && v._2._1.report.lane != 4 &&  v._2._2 != -1)
+    events
+      .filter(e => e.typ == POSITION_REPORT || e.typ == ACCOUNT_BALANCE_REQUEST)
+      .map(e => ((e.vid, e.time.toInt, e.xWay.toInt), e))
+      .join(segmentStats)
       .map(r => {
-        val time = r._2._1.report.time
-        val emit = math.round((System.currentTimeMillis() - r._2._1.report.internalTime)/1000f)
-        s"1,$time,$emit,${r._1.xWay},${r._2._2},${r._1.dir},${r._2._1.report.vid}"
+        val report = r._2._1
+        if (report.typ == POSITION_REPORT) {
+
+          val isAccident  = r._2._2._1 != -1
+          val lav         = r._2._2._2
+          val nov         = r._2._2._3
+          val isCrossing  = r._2._2._4
+          val toll        = calculateToll(lav, nov, isAccident)
+
+          val lane        = report.lane
+          val emit        = math.round((System.currentTimeMillis() - report.internalTime)/1000f)
+
+          if (report.vid == 16265 && report.time == 1150)
+            System.out.print()
+
+          ((report.vid, report.xWay), s"notify,${report.time},${report.internalTime},$lav,$toll,$lane,$isCrossing")
+        } else {
+          val qid = report.qid
+          if (report.time == 1698 && qid.equals("5846"))
+            System.out.println()
+          ((report.vid, report.xWay), s"get,${report.time},${report.internalTime},$qid")
+        }
       })
-
-
-    // ##################### NUMBER OF VEHICLES LOGIC ######################
-
-    val NOV = vehicleStats
-      .map(r => (XWaySegDirMinute(r._2.report.xWay, r._2.report.segment, r._2.report.direction, (r._2.report.time/60+1).toShort), if (r._2.isCrossing) 1 else 0))
-      .reduceByKey((r1, r2) => r1 + r2)
-      .map(r => {
-        (XwaySegDir(r._1.xWay, r._1.seg, r._1.dir), (r._1.minute, r._2))
-      })
-      .mapWithState(StateSpec.function(TrafficAnalytics.updateNOV2 _))
-
-    // ##################### AVERAGE VELOCITY LOGIC ######################
-
-    val LAV = positionReports
-      .map(r => (XWaySegDirMinute(r._2.xWay, r._2.segment, r._2.direction, (r._2.time/60+1).toShort), (1, r._2.speed)))
-      .reduceByKey((r1, r2) => (r1._1 + r2._1, r1._2 + r2._2))
-      .mapWithState(StateSpec.function(TrafficAnalytics.spdSumPerMinute _).timeout(Seconds(120)))
-      .filter(_.isDefined)
-      .map(_.get)// TODO improve processing time
-      .mapWithState(StateSpec.function(TrafficAnalytics.lav _))
-
-
-    val tolls = accidents.join(LAV).join(NOV)
-      .map(r => {
-
-        val info = r._2._1._1._1
-        val isAccident = r._2._1._1._2 != -1
-
-        val lav = r._2._1._2
-        val nov = r._2._2
-
-        val toll = calculateToll(lav, nov, isAccident)
-        val lane = info.report.lane
-        val isCrossing = info.isCrossing
-        val emit = math.round((System.currentTimeMillis() - info.report.internalTime)/1000f)
-
-        //val action = if (info.report.lane != 4) "update" else "reset"
-
-        ((info.report.vid, info.report.xWay), s"notify,${info.report.time},$emit,$lav,$toll,$lane,$isCrossing")
-        //(info.report.vid, r._2._1._1.report.time, -1, lav, toll)
-      })
-
-    // ##################### ACCOUNT BALANCE REQUESTS ######################
-    val accRequests = events
-      .filter(_.typ == 2)
-      .map(e => ((e.vid, e.xWay), s"get,${e.time},${e.internalTime},${e.qid}"))
-
-    tolls
-      .union(accRequests)
-      .mapWithState(StateSpec.function(processToll _))
+      .mapWithState(function(updateAccountBalance _))
       .filter(r => r.isDefined)
       .map(_.get)
       .union(accidentAlerts)
       .union(daily)
-      .checkpoint(Seconds(4))
+      //.checkpoint(Seconds(4))
       .foreachRDD(rdd => {
         rdd.foreachPartition(partition => {
           val props = producerParams.value
-          val producer = new KafkaProducer[String,String](props)
+          val producer = new KafkaProducer[String, String](props)
           partition.foreach( record => {
             val data = record
-            val message = new ProducerRecord[String, String]("output-2000k", null, data)
+            val message = new ProducerRecord[String, String](outputTopic, null, data)
             producer.send(message)
           } )
           producer.close()
@@ -234,71 +226,47 @@ object LinearRoadBenchmark {
     ssc.awaitTermination()
   }
 
-  def processToll(key: (Int, Byte), value:Option[String], state:State[Array[Int]]):Option[String] = {
+  def updateAccountBalance(key: (Int, Byte), value:Option[String], state:State[List[Int]]):Option[String] = {
 
     val arr = value.get.split(",")
+    val tolls = state.getOption().getOrElse(List[Int]()) // previous toll, current balance, time
+    val time        = arr(1).toInt
+    val intTime     = arr(2).toLong
+    val emit        = math.round((System.currentTimeMillis() - intTime)/1000f)
 
-    val currentBalance = state.getOption().getOrElse(Array[Int](0,0,0)) // previous toll, current balance, time
+    val response = if (arr(0) == "notify") {
 
-    val res = if (arr(0) == "notify") {
-
-      val time        = arr(1).toInt
-      val procTime    = arr(2)
       val lav         = arr(3)
       val toll        = arr(4).toInt
       val lane        = arr(5).toByte
       val isCrossing  = arr(6).toBoolean
 
-      currentBalance(2) = time
+      //currentBalance(2) = time
 
       if (isCrossing && lane != 4) {
-        currentBalance(1) += currentBalance(0)
-        currentBalance(0) = toll
-      }
-
-      state.update(currentBalance)
-
-      if (isCrossing && lane != 4) {
-        Some(s"0,${key._1},$time,$procTime,$lav,$toll")
+        //currentBalance(1) += currentBalance(0)
+        //currentBalance(0) = toll
+        val newTolls = tolls ++ List(toll)
+        state.update(newTolls)
+        Some(s"0,${key._1},$time,1,$lav,$toll")
       } else {
         None
       }
 
     } else {
-    //} else if(arr(0).equals("get")) {
 
-      val time = arr(1).toShort
-      val intTime = arr(2).toLong
-      val qid = arr(3)
-      val emit = math.round((System.currentTimeMillis() - intTime)/1000f)
+      val qid         = arr(3)
+      //val resultTime  = currentBalance(2)
+      val bal         = tolls.sum
 
-      val resultTime = currentBalance(2)
-      val bal = currentBalance(1)
+      if (qid.equals("5846"))
+        System.out.println()
 
-      Some(s"2,$time,$emit,$resultTime,$qid,$bal")
+      Some(s"2,$time,1,$time,$qid,$bal")
 
-    } /*else {
-      // reset
-      currentBalance(0) = 0
-      state.update(currentBalance)
-
-      None
-    }*/
-
-    res
-  }
-
-  @deprecated
-  def getDailyExpenditure(key:(Int, Short), value:Option[(Int,Byte)], state:State[Array[Byte]]):(Int,Int) = {
-
-    val qid = value.get._1
-    val day = value.get._2
-
-    val exp = state.getOption() match {
-      case Some(s) => s(day-1)
-      case None => -1
     }
-    (qid, exp)
+
+    response
   }
 
   /*def updateNumberOfPositionReports(key: XwayDir, value:Option[(PositionReport, Boolean)], state:State[Map[Int, Array[(Int,Int,Int)]]]):(XwayDir, (Int,Int,Int,Int,Int,Int)) = {
@@ -454,8 +422,8 @@ object LinearRoadBenchmark {
     * @param e @see Event
     * @return Tuple (vehicleID, PositionReport)
     */
-  def toPositionReport(e:Event):(Int, PositionReport) = {
-    (e.vid, PositionReport(e.time, e.vid, e.speed, e.xWay, e.lane, e.direction, e.segment, e.position, e.internalTime))
+  def toPositionReport(e:Event):((Int,Int), PositionReport) = {
+    ((e.xWay, e.vid), PositionReport(e.time, e.vid, e.speed, e.xWay, e.lane, e.direction, e.segment, e.position, e.internalTime, isStopped = false, isCrossing = false, -1, -1))
   }
 
 
@@ -467,10 +435,6 @@ object LinearRoadBenchmark {
   def calculateToll(lav:Double, nov:Int, isAccident:Boolean):Int = {
     if (lav >= 40 || nov <= 50 || isAccident) 0
     else 2 * scala.math.pow(nov - 50, 2).toInt
-  }
-
-  def keyByVehicle(event: Event):(Int, PositionReport) = {
-    (event.vid, PositionReport(event.time, event.vid, event.speed, event.xWay, event.lane, event.direction, event.segment, event.position, event.internalTime))
   }
 
 }

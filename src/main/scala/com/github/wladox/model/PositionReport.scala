@@ -4,14 +4,18 @@ package com.github.wladox.model
   * Created by wladox on 15.01.17.
   */
 case class PositionReport(time:Int,
-                           vid:Int,
-                           speed:Int,
-                           xWay:Byte,
-                           lane:Byte,
-                           direction:Byte,
-                           segment:Byte,
-                           position:Int,
-                           internalTime:Long
+                          vid:Int,
+                          speed:Int,
+                          xWay:Byte,
+                          lane:Byte,
+                          direction:Byte,
+                          segment:Byte,
+                          position:Int,
+                          internalTime:Long,
+                          isStopped:Boolean,
+                          isCrossing:Boolean,
+                          lastLane:Byte,
+                          lastPos:Int
                           ) {
 
   override def toString = s"$time.$vid.$speed.$position.$xWay.$lane.$direction.$segment"

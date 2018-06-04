@@ -1,30 +1,35 @@
 package com.github.wladox.component
 
-import com.github.wladox.LinearRoadBenchmark.XwayDir
+import com.github.wladox.XwayDir
 import com.github.wladox.model.XwaySegDir
 import org.apache.spark.streaming.State
 
 /**
-  * Created by wladox on 04.01.17.
+  * Created by Wladimir Postnikov on 04.01.17.
   */
 
-case class CarSpeed(vid:Int, spd:Int)
-case class TollNotification(typ:Int, vid:Int, time: Long, emit: Long, spd: Byte, toll: Double, nov:Int) {
-  override def toString =
-    "TOLL: (type: " + typ + ", time: " + time + ", emit: "+ emit + ", vehicle: " + vid + ", speed: " + spd + ", toll: " + toll + ", nov: " + nov + ")"
-}
-case class CarStoppedEvent(vid:Int, pos: Int)
-case class PositionReportHistory(xWay:Byte, lane:Byte, pos:Int, dir:Byte, count:Int)
-case class LAVEvent(key: XWaySegDirMinute, state:Double) {
-  override def toString: String = s"AVG VELOCITY on $key is $state"
-}
-case class NOVEvent(key: XWaySegDirMinute, nov:Int) {
-  override def toString: String = s"NOV: $key -> $nov"
-}
 case class XWaySegDirMinute(xWay:Byte, seg:Byte, dir:Byte, minute: Short) {
+
   override def toString: String = xWay + "." + seg + "." + dir + "." + minute
+
+  def canEqual(a: Any): Boolean = a.isInstanceOf[XWaySegDirMinute]
+
+  override def equals(that: Any): Boolean =
+    that match {
+      case that: XWaySegDirMinute => that.canEqual(this) && this.hashCode == that.hashCode
+      case _ => false
+    }
+  override def hashCode: Int = {
+    val prime = 31
+    var result = 1
+    result = prime * result + xWay.toInt
+    result = prime * result + seg.toInt
+    result = prime * result + dir.toInt
+    result = prime * result + minute.toInt
+    result
+  }
+
 }
-case class  XwaySegDirVidMin(xWay:Int, seg:Byte, dir:Byte, vid:Int, minute:Short)
 
 object TrafficAnalytics {
 
@@ -113,39 +118,28 @@ object TrafficAnalytics {
     (vid, fiveMinSum.sum/5, nov)
   }
 
-
-  /*def vehicleAvgSpd(key: XWaySegDirMinute, value:Option[(Double,Int)], state:State[(Double,Int)]):(XWaySegDirMinute, Double) = {
-    val currentSpd = value.get
-
-    state.getOption() match {
-      case Some(s) =>
-        val newSpeed = s._1 + currentSpd._1
-        val newCount = s._2 + currentSpd._2
-        state.update((newSpeed, newCount))
-        (key, newSpeed/newCount)
-      case None =>
-        state.update(currentSpd)
-        (key, currentSpd._1/currentSpd._2)
-    }
-  }*/
-
   /**
     * Updates sum of vehicle speeds per minute.
     *
     * @param key XWaySegDirMinute
-    * @param value Amount of emitted reports in the batch, Sum of all speeds in the batch
-    * @param state Sum of all emitted reports, Sum of all speeds
+    * @param value (Vid, Speed)
+    * @param state Count of all emitted reports, Sum of all speeds
     * @return
     */
-  def spdSumPerMinute(key:XWaySegDirMinute, value:Option[(Int, Int)], state:State[(Int, Int)]):Option[(XwaySegDir, (Short, Int, Int))] = {
+  def spdSumPerMinute(key:XWaySegDirMinute, value:Option[(Int, Int, Int)], state:State[(Int, Int)]):Option[(XwaySegDir, (Int, Int, Int, Int))] = {
 
-    def updateSegmentStatistics(tuple:(Int,Int)):Option[(XwaySegDir, (Short, Int, Int))] = {
+    if (key.seg == 63 && key.dir == 0 && key.minute == 19)
+      System.out.println()
+
+    def updateSegmentStatistics(tuple:(Int,Int,Int)):Option[(XwaySegDir, (Int, Int, Int, Int))] = {
       val newState = state.getOption() match {
-        case Some(s) => (s._1 + tuple._1, s._2 + tuple._2)
-        case None => value.get
+        case Some(s) => (s._1 + 1, s._2 + tuple._2)
+        case None => (1, tuple._2)
       }
+
       state.update(newState)
-      Some(XwaySegDir(key.xWay, key.seg, key.dir), (key.minute, newState._1, newState._2))
+
+      Some(XwaySegDir(key.xWay, key.seg, key.dir), (tuple._1, newState._1, newState._2, tuple._3))
     }
 
     value match {
@@ -159,27 +153,25 @@ object TrafficAnalytics {
     * Lates average velocity
     *
     * @param key
-    * @param value (Minute, Count, Speed)
+    * @param value (VID, Speed, Time)
     * @param state Map(Minute -> (Speed, Count)
     * @return
     */
-  def lav(key:XwaySegDir, value:Option[(Short, Int, Int)], state:State[Array[(Int,Int)]]):(XWaySegDirMinute, Int) = {
+  def lav(key:XwaySegDir, value:Option[(Int, Int, Int)], state:State[Array[(Int,Int)]]):((Int,Int,Int), Int) = {
 
-    val minute  = value.get._1
-    val count   = value.get._2
-    val speed   = value.get._3
+    val vid     = value.get._1
+    val speed   = value.get._2
+    val minute  = value.get._3/60+1
 
     val newState = state.getOption() match {
       case Some(s) =>
-        val old = s(minute)
-        s(minute) = (old._1 + speed, old._2 + count)
+        s(minute) = (s(minute)._1 + speed, s(minute)._2 + 1)
         s
       case None =>
         // first minute of simulation, thus no LAV exists
         val arr = Array.fill(181)((0,0))
-        arr(minute) = (speed, count)
+        arr(minute) = (speed, 1)
         arr
-        //Map[Short, (Int,Int)](minute -> (speed, count))
     }
 
     state.update(newState)
@@ -187,109 +179,42 @@ object TrafficAnalytics {
     val statistics = for (i <- minute-5 until minute if i > 0) yield newState(i)
 
     if (statistics.nonEmpty) {
-
+      if (vid == 34753 && value.get._3 == 2400)
+        System.out.print()
       val lav = statistics.foldLeft((0, 0)) { case ((t1speed, t1count), (t2speed, t2count)) => (t1speed + t2speed, t1count + t2count) }
 
-      (XWaySegDirMinute(key.xWay, key.segment, key.direction, minute), math.round(lav._1/lav._2.toFloat))
+      ((vid, value.get._3, key.xWay), math.round(lav._1/lav._2.toFloat))
     } else {
-      (XWaySegDirMinute(key.xWay, key.segment, key.direction, minute), 0)
+      ((vid, value.get._3, key.xWay), 0)
     }
 
   }
 
-  /**
-    * Counts vehicles in the current batch that crossed into a new segment.
-    *
-    * @param input Keyed stream of vehicles with vehicleID as key, and VehicleInformation as value
-    * @return number of new vehicles per Xway, Segment, Direction and Minute
-    */
-  /*def countVehiclesInBatch(input:DStream[(Int, VehicleInformation)]):DStream[(XWaySegDirMinute, Int)] = {
-    input
-      .map(r => (XWaySegDirMinute(r._2.xWay, (r._2.position/5280).toByte, r._2.direction, r._2.minute), if (r._2.segmentCrossing) 1 else 0))
-      .reduceByKey((x,y) => x + y)
-  }*/
+  def updateNOV(key:XwaySegDir, value:Option[(Int, Int, Int)], state:State[Map[String, Set[Int]]]):((Int,Int,Int), Int) = {
 
-  /**
-    * Calculates the average velocity of all vehicles in the current batch per Xway,Segment,Direction and minute
-    * by building the sum of the speeds and of the number of vehicles.
-    *
-    * @param input Keyed stream of vehicles with vehicleID as key, and VehicleInformation as value
-    * @return @see vehicleAvgSpd
-    */
-  /*def averageVelocities(input:DStream[(Int, VehicleInformation)]):MapWithStateDStream[XWaySegDirMinute, (Double, Int), (Double, Int), (XWaySegDirMinute, Double)] = {
-    val state = StateSpec.function(vehicleAvgSpd _)
+    val vid   = value.get._1
+    val time  = value.get._3
 
-    input.map(r => {
-      val info = r._2
-      (XWaySegDirMinute(info.xWay, (info.position/5280).toByte, info.direction, info.minute), (info.speed, 1))
-    })
-    .reduceByKey((t1,t2) => {
-      (t1._1 + t2._1, t1._2 + t2._2)
-    })
-    .mapWithState(state)
-  }*/
-
-  def updateNOV(key:XwayDir, value:Option[VehicleInformation], state:State[Map[Int, Array[Int]]]):(XwayDir, Int) = {
-
-    val currentState = state.getOption().getOrElse(Map())
-    val info = value.get
-    val minute = info.report.time/60+1
-    val segment = info.report.segment
-
-
-    val newState = state.getOption() match {
-      case Some(s) => s
-      case None =>
-        val arr = Array.fill[Int](100)(0)
-        Map[Int, Array[Int]](minute -> arr)
-    }
-
-
-    if (info.isCrossing) {
-      // vehicle entered new segment -> thus we have to increment the counter
-        val updated = if (newState.contains(minute)) {
-          val segments = newState(minute)
-          segments(segment) += 1
-          newState
-        } else {
-          val arr = Array.fill[Int](100)(0)
-          arr(segment) += 1
-          newState ++ Map[Int, Array[Int]](minute -> arr)
-        }
-      state.update(updated)
-    }
-
-    val s = state.getOption().getOrElse(Map())
-    (key, s(minute)(segment))
-
-  }
-
-  def updateNOV2(key:XwaySegDir, value:Option[(Short, Int)], state:State[Map[Short, Int]]):(XWaySegDirMinute, Int) = {
-
-    val minute = value.get._1
-    val count = value.get._2
-
-    if (key.segment == 55 && key.direction == 0 && minute == 17)
-      System.out.print()
-
-    if (key.segment == 55 && key.direction == 0 && minute == 18)
-      System.out.print()
+    val minute = (time/60+1).toString
 
     val newState = state.getOption() match {
       case Some(s) => if (s.contains(minute)) {
-        val newCount = s(minute) + count
-        s ++ Map(minute -> newCount)
+        val newSet = Set(vid) ++ s(minute)
+        s ++ Map(minute -> newSet)
       } else {
-        s ++ Map(minute -> count)
+        s ++ Map(minute -> Set(vid))
       }
-      case None => Map(minute -> count)
+      case None => Map(minute -> Set(vid))
     }
 
     state.update(newState)
 
-    val NOVinPreviousMinute = newState.getOrElse((minute - 1).toShort, 0)
+    val prevKey = (time/60).toString
+    val prevMinSet = newState.getOrElse(prevKey, Set())
 
-    (XWaySegDirMinute(key.xWay, key.segment, key.direction, minute), NOVinPreviousMinute)
+    if (vid == 23574 && time == 1519)
+      System.out.print()
+    ((vid, time, key.xWay), prevMinSet.size)
 
   }
 
