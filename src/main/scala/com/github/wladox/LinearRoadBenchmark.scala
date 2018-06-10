@@ -126,7 +126,8 @@ object LinearRoadBenchmark {
 
     val events = streams
       .filter(v => !v.value().isEmpty)
-      .transform(rdd => rdd.map(deserializeEvent).partitionBy(partitioner).setName("source"))
+      .map(deserializeEvent)
+      //.transform(rdd => rdd.map(deserializeEvent).partitionBy(partitioner).setName("source"))
       .cache()
 
 
@@ -157,7 +158,7 @@ object LinearRoadBenchmark {
 
     // ##################### ACCIDENT DETECTION ######################
 
-    val myPartitioner = new Partitioner() {
+    /*val myPartitioner = new Partitioner() {
 
       override def numPartitions: Int = 2
 
@@ -169,12 +170,12 @@ object LinearRoadBenchmark {
           XwayDir(k._1, k._2).hashCode % numPartitions
         }
       }
-    }
+    }*/
 
     val updatedPositionReports = type0type2
       .filter(e => e._2.typ == POSITION_REPORT)
       .map(r => keyByVid(r._2))
-      .mapWithState(function(VehicleStatistics.updateLastReport _).partitioner(myPartitioner))
+      .mapWithState(function(VehicleStatistics.updateLastReport _))
 
       //.mapWithState(function(VehicleStatistics.updateStoppedVehicles _))
 
@@ -206,7 +207,7 @@ object LinearRoadBenchmark {
         })
       })
 
-    val novPartitioner = new Partitioner() {
+    /*val novPartitioner = new Partitioner() {
 
       override def numPartitions: Int = 2
 
@@ -216,7 +217,7 @@ object LinearRoadBenchmark {
           nonNegativeMod(XwayDir(xway, direction).hashCode, numPartitions)
         }
       }
-    }
+    }*/
 
     val keyedReports = type0type2
       .filter(e => e._2.typ == POSITION_REPORT)
@@ -224,7 +225,7 @@ object LinearRoadBenchmark {
       .cache()
     //.transform(rdd => rdd.map(r => (XwaySegDir(r._2.xWay, r._2.segment, r._2.direction), (r._2.vid, r._2.speed, r._2.time))).partitionBy(novPartitioner))
 
-    val vidPartitioner = new Partitioner() {
+    /*val vidPartitioner = new Partitioner() {
 
       override def numPartitions: Int = 4
 
@@ -236,26 +237,26 @@ object LinearRoadBenchmark {
         }
       }
 
-    }
+    }*/
 
     // ##################### NUMBER OF VEHICLES ######################
-    val NOV = keyedReports.mapWithState(function(TrafficAnalytics.updateNOV _).partitioner(novPartitioner))
+    val NOV = keyedReports.mapWithState(function(TrafficAnalytics.updateNOV _))
       // TODO add partitioner
 
     // ##################### AVERAGE VELOCITY ######################
-    val LAV = keyedReports.mapWithState(function(TrafficAnalytics.updateLAV _).partitioner(novPartitioner))
+    val LAV = keyedReports.mapWithState(function(TrafficAnalytics.updateLAV _))
 
     // CORRECT ORDER DO NOT TOUCH
 
     // ##################### TOLL CALCULATION / NOTIFICATION ######################
     val segmentStats = LAV
-      .join(NOV, vidPartitioner)    // JOIN CORRECTLY
-      .join(accidents, vidPartitioner) //.saveAsTextFiles("output/acc-")
+      .join(NOV)    // JOIN CORRECTLY
+      .join(accidents) //.saveAsTextFiles("output/acc-")
       .mapValues(v => (v._1._1, v._1._2, v._2._2, v._2._1.isCrossing))
 
     type0type2
       .map(e => (s"${e._2.vid}.${e._2.time}.${e._2.xWay}", e))
-      .join(segmentStats, vidPartitioner)
+      .join(segmentStats)
       .filter(r => (r._2._2._4 && r._2._1._2.lane != 4) || r._2._1._2.typ == ACCOUNT_BALANCE_REQUEST)
       .map(r => {
 
