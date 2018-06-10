@@ -20,7 +20,7 @@ case class Event(
 ) extends Serializable{
 
   override def toString: String =
-    "(time: " + time + ", vehicle: " + vid + ", speed: " + speed + ", pos: " + position + ", xWay: " + xWay + ", lane: " + lane + ", direction: " + direction + ", segment: " + segment + ")"
+    s"$time.$vid.$speed.$position.$xWay.$lane.$direction.$segment.$qid"
 
 }
 

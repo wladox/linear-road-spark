@@ -4,11 +4,11 @@ import com.github.wladox.XwayDir
 import com.github.wladox.model.PositionReport
 import org.apache.spark.streaming.State
 
-case class Accident(time:Int, clearTime:Int, accidentCars:Set[Int]) {
-  override def toString: String = s"$time,$clearTime,$accidentCars"
-}
-
 object VehicleStatistics {
+
+  case class Accident(firstCar:Int, secondCar:Int, created:Int, cleared:Int) {
+    override def toString: String = s"$firstCar,$secondCar,$created.$cleared"
+  }
 
   /**
     * Updates latest vehicle state to calculate current  speed, whether the vechile is stopped.
@@ -18,7 +18,7 @@ object VehicleStatistics {
     * @param state  previous position report, stop counter
     * @return stream with updated vehicle information (VID, (Positionreport, isStopped, isSegmentCrossing, subtractSpeed, addSpeed, vehicleCount))
     */
-  def updateLastReport(key:(Int,Int), value:Option[PositionReport], state:State[(PositionReport, Int)]):(XwayDir, PositionReport) = {
+  def updateLastReport(key:(Byte,Byte,Int), value:Option[PositionReport], state:State[(PositionReport, Int)]):(XwayDir, PositionReport) = {
 
     val currentReport = value.get
 
@@ -34,7 +34,7 @@ object VehicleStatistics {
 
         state.update((currentReport, newCounter))
 
-        (XwayDir(key._1, currentReport.direction), PositionReport(
+        (XwayDir(key._1, key._2), PositionReport(
           currentReport.time,
           currentReport.vid,
           currentReport.speed,
@@ -53,7 +53,7 @@ object VehicleStatistics {
 
         state.update(currentReport, 1)
 
-        (XwayDir(key._1, currentReport.direction), PositionReport(
+        (XwayDir(key._1, key._2), PositionReport(
           currentReport.time,
           currentReport.vid,
           currentReport.speed,
@@ -116,12 +116,6 @@ object VehicleStatistics {
 
     }
 
-    if (report.vid == 16265 && report.time == 1150)
-      System.out.print()
-
-    if ((report.vid == 5768 || report.vid == 0) && report.time == 621 && report.segment == 40)
-      System.out.print()
-
     state.update(newMap)
     val stoppedCars = newMap.getOrElse(mapKey, Set()).size
     (key, (report, stoppedCars))
@@ -134,25 +128,37 @@ object VehicleStatistics {
     * @param state
     * @return
     */
-  def updateAccidents(key: XwayDir, value:Option[(PositionReport, Int)], state:State[Map[Byte, Accident]]):((Int,Int,Int), (PositionReport, Byte)) = {
+  def updateAccidents(key: XwayDir, value:Option[PositionReport], state:State[Map[Int, Accident]]):(String, (PositionReport, Int)) = {
 
-    val report          = value.get._1
+    val report          = value.get
     val vid             = report.vid
     val segment         = report.segment
-    val stoppedVehicles = value.get._2
     val minute          = report.time/60+1
 
     //val accidents:Array[Int] = state.getOption().getOrElse(Array.fill(100)(-1))
-    val accidents = state.getOption().getOrElse(Map())
+    val accidents:Map[Int,Accident] = state.getOption().getOrElse(Map[Int, Accident]())
 
     // UPDATE/CREATE ACCIDENTS
     // if the current vehicle is stopped and the # of stopped vehicles on the lane and position of the current vehicle
     // is greater than 1, then we need to create or update an accident
     // if there is no accident stored for the given segment create new accident
 
+
     if (report.isStopped) {
       // there is an accident
-      if (stoppedVehicles > 1) {
+      if (accidents.contains(report.segment)) {
+        val accident = accidents(report.segment)
+        if (accident.secondCar == -1) {
+          val newAccident = Accident(accident.firstCar, report.vid, minute, -1)
+          //System.out.println("ACCIDENT OCCURED: min=" + minute + " seg=" + report.segment)
+          val newState = accidents ++ Map(report.segment.toInt -> newAccident)
+          state.update(newState)
+        }
+      } else {
+        val newState = accidents ++ Map(report.segment.toInt -> Accident(report.vid, -1, 999, -1))
+        state.update(newState)
+      }
+      /*if (stoppedVehicles > 1) {
         if (accidents.contains(segment)) {
           // there is already an accident on the given segment, so just add the VID to it
           val acc = accidents(segment)
@@ -171,10 +177,22 @@ object VehicleStatistics {
 
       } else {
       // only 1 car is stopped, nothing to do
-      }
+      }*/
     } else {
+
+      val prevSegment = report.lastPos / 5280
+      if (accidents.contains(prevSegment) && accidents(prevSegment).cleared == -1 &&
+        (accidents(prevSegment).firstCar == report.vid || accidents(prevSegment).secondCar == report.vid)) {
+        val unclearedAccident = accidents(prevSegment)
+        val clearedAccident = Accident(unclearedAccident.firstCar, unclearedAccident.secondCar, unclearedAccident.created, minute)
+        val newState = accidents ++ Map(prevSegment -> clearedAccident)
+        state.update(newState)
+      } else {
+        state.update(accidents)
+      }
+
       // clear old accident if the current car was involved
-      val lastSegment = (report.lastPos/5280).toByte
+      /*val lastSegment = (report.lastPos/5280).toByte
       if (accidents.contains(lastSegment)) {
         val cleared = clearAccident(report, accidents(lastSegment))
         val newState = cleared match {
@@ -194,17 +212,19 @@ object VehicleStatistics {
           case None => accidents
         }
         state.update(newState)
-      }
+      }*/
     }
 
+
+
     // RETRIEVE ACCIDENTS IN SEGMENT RANGE
-    val range = if (key.dir == 0) {
+    /*val range = if (key.dir == 0) {
       val to = segment+4
       accidents.filter(e => e._1 >= segment && e._1 <= to)
     } else {
       val from = segment-4
       accidents.filter(e => e._1 >= from && e._1 <= segment)
-    }
+    }*/
 
     // direction: 0 -> eastbound, 1 <- westbound
     // depending on direction:
@@ -213,29 +233,52 @@ object VehicleStatistics {
     // if values > -1 are found, check if one of them is smaller than the current minute
     // if yes, then there is accident detected else
 
-    val segm:Byte = findAccident(minute.toShort, range) match {
+    /*val segm:Byte = findAccident(minute.toShort, range) match {
       case Some(res) => res._1
       case None => -1
-    }
+    }*/
 
-    if ((report.vid == 5768 || report.vid == 0) && report.time == 621 && report.segment == 40)
+    val from  = if (report.direction == 0) report.segment else math.max(report.segment - 4, 0)
+    val to    = if (report.direction == 0) math.min(report.segment + 4, 99) else report.segment
+
+    val isAccident = state.get().find(acc => {
+      acc._1 >= from && acc._1 <= to && ((minute >= acc._2.created+1 && acc._2.cleared == -1) || (minute >= acc._2.created+1 && minute <= acc._2.cleared))
+    })
+
+    val segm = if (isAccident.isDefined) isAccident.get._1 else -1
+
+    /*if ((report.vid == 5768 || report.vid == 0) && report.time == 621 && report.segment == 40)
       System.out.print()
 
     if (report.vid == 16265 && report.time == 1150)
-      System.out.print()
+      System.out.print()*/
 
-    ((report.vid, report.time, report.xWay),(report, segm))
+    (s"${report.vid}.${report.time}.${report.xWay}",(report, segm))
   }
 
-  def findAccident(minute:Short, accidents:Map[Byte, Accident]):Option[(Byte, Accident)] = {
-    accidents.find(t => {
-      (t._2.time+1 <= minute && t._2.clearTime == -1) || (t._2.time+1 <= minute && minute <= t._2.clearTime)
+  def findAcc(report:PositionReport, accidents:Array[Option[Accident]]): Int = {
+
+    val from  = if (report.direction == 0) report.segment else math.max(report.segment - 4, 0)
+    val to    = if (report.direction == 0) math.min(report.segment + 4, 99) else report.segment
+    val minute = report.time/60+1
+    val range = accidents.zipWithIndex.slice(from, to+1)
+
+    val acc = range.find(t => {
+      t._1.isDefined && ((minute >= t._1.get.created+1 && t._1.get.cleared == -1) || (minute >= t._1.get.created+1 && minute <= t._1.get.cleared))
     })
+
+    if (acc.isDefined) acc.get._2 else -1
   }
 
-  def clearAccident(p:PositionReport, acc:Accident):Option[Accident] = {
+//  def findAccident(minute:Short, accidents:Map[Byte, Accident]):Option[(Byte, Accident)] = {
+//    accidents.find(t => {
+//      (t._2.time+1 <= minute && t._2.clearTime == -1) || (t._2.time+1 <= minute && minute <= t._2.clearTime)
+//    })
+//  }
+
+  /*def clearAccident(p:PositionReport, acc:Accident):Option[Accident] = {
     if (acc.accidentCars.contains(p.vid) && acc.clearTime == -1)
       return Some(Accident(acc.time, p.time/60+1, acc.accidentCars))
     None
-  }
+  }*/
 }

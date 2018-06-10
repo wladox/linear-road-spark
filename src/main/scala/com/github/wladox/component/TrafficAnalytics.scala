@@ -31,6 +31,27 @@ case class XWaySegDirMinute(xWay:Byte, seg:Byte, dir:Byte, minute: Short) {
 
 }
 
+
+case class VidTimeXway(vid:Int, time:Int, xWay:Int) {
+
+  def canEqual(a: Any): Boolean = a.isInstanceOf[VidTimeXway]
+
+  override def equals(that: Any): Boolean =
+    that match {
+      case that: VidTimeXway => that.canEqual(this) && this.hashCode == that.hashCode
+      case _ => false
+    }
+  override def hashCode: Int = {
+    val prime = 31
+    var result = 1
+    result = prime * result + xWay
+    result = prime * result + vid
+    result = prime * result + time
+    result
+  }
+}
+
+
 object TrafficAnalytics {
 
   /**
@@ -155,9 +176,9 @@ object TrafficAnalytics {
     * @param key
     * @param value (VID, Speed, Time)
     * @param state Map(Minute -> (Speed, Count)
-    * @return
+    * @return ((VID, time, Xway), LAV)
     */
-  def lav(key:XwaySegDir, value:Option[(Int, Int, Int)], state:State[Array[(Int,Int)]]):((Int,Int,Int), Int) = {
+  def updateLAV(key:XwaySegDir, value:Option[(Int, Int, Short)], state:State[Array[(Int,Int)]]):(String, Int) = {
 
     val vid     = value.get._1
     val speed   = value.get._2
@@ -179,18 +200,24 @@ object TrafficAnalytics {
     val statistics = for (i <- minute-5 until minute if i > 0) yield newState(i)
 
     if (statistics.nonEmpty) {
-      if (vid == 34753 && value.get._3 == 2400)
-        System.out.print()
+
       val lav = statistics.foldLeft((0, 0)) { case ((t1speed, t1count), (t2speed, t2count)) => (t1speed + t2speed, t1count + t2count) }
 
-      ((vid, value.get._3, key.xWay), math.round(lav._1/lav._2.toFloat))
+      (s"$vid.${value.get._3}.${key.xWay}", math.round(lav._1/lav._2.toFloat))
     } else {
-      ((vid, value.get._3, key.xWay), 0)
+      (s"$vid.${value.get._3}.${key.xWay}", 0)
     }
 
   }
 
-  def updateNOV(key:XwaySegDir, value:Option[(Int, Int, Int)], state:State[Map[String, Set[Int]]]):((Int,Int,Int), Int) = {
+  /**
+    *
+    * @param key
+    * @param value
+    * @param state
+    * @return ((VID, time, Xway), NOV)
+    */
+  def updateNOV(key:XwaySegDir, value:Option[(Int, Int, Short)], state:State[Map[String, Set[Int]]]):(String, Int) = {
 
     val vid   = value.get._1
     val time  = value.get._3
@@ -212,10 +239,7 @@ object TrafficAnalytics {
     val prevKey = (time/60).toString
     val prevMinSet = newState.getOrElse(prevKey, Set())
 
-    if (vid == 23574 && time == 1519)
-      System.out.print()
-    ((vid, time, key.xWay), prevMinSet.size)
-
+    (s"$vid.$time.${key.xWay}", prevMinSet.size)
   }
 
 }
