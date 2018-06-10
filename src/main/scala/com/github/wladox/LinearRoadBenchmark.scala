@@ -70,7 +70,7 @@ object LinearRoadBenchmark {
 
   def main(args: Array[String]): Unit = {
 
-    if (args.length < 7) {
+    if (args.length < 5) {
       System.err.println("Usage: LinearRoadBenchmark <checkpointDir> <inputTopic> <outputTopic> <tollHistory> <kafkaBroker>")
       System.exit(1)
     }
