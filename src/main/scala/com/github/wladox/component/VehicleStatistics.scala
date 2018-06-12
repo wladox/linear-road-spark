@@ -1,7 +1,7 @@
 package com.github.wladox.component
 
 import com.github.wladox.XwayDir
-import com.github.wladox.model.PositionReport
+import com.github.wladox.model.{Event, PositionReport}
 import org.apache.spark.streaming.State
 
 object VehicleStatistics {
@@ -15,58 +15,36 @@ object VehicleStatistics {
     *
     * @param key    (Xway, Direction, Vehicle ID)
     * @param value  Position report
-    * @param state  previous position report, stop counter
+    * @param state  (position, lane, counter)
     * @return stream with updated vehicle information (VID, (Positionreport, isStopped, isSegmentCrossing, subtractSpeed, addSpeed, vehicleCount))
     */
-  def updateLastReport(key:(Byte,Byte,Int), value:Option[PositionReport], state:State[(PositionReport, Int)]):(XwayDir, PositionReport) = {
+  def updateLastReport(key:XwayDir, value:Option[Event], state:State[Map[Int, (Int, Byte, Byte, Int)]]):(XwayDir, PositionReport) = {
 
-    val currentReport = value.get
+    val event = value.get
+    val reports = state.getOption().getOrElse(Map[Int, (Int,Byte,Byte,Int)]())
 
-    state.getOption() match {
-      case Some(lastReport) =>
+    if (reports.contains(event.vid)) {
+      val lastReport      = reports(event.vid)
+      val equal           = event.position == lastReport._1 && event.lane == lastReport._2
+      val isCrossing      = event.segment != (lastReport._1/5280) || lastReport._2 == 4
+      val minute          = event.time/60+1
+      val newMinute       = minute != lastReport._4
+      val newCounter      = if (equal) lastReport._3 + 1 else 1
+      val isStopped       = newCounter >= 4
 
-        val equal           = positionChanged(lastReport._1, currentReport)
-        val isCrossing      = currentReport.segment != lastReport._1.segment || lastReport._1.lane == 4
-        val newCounter      = if (equal) lastReport._2 + 1 else 1
-        val isStopped       = newCounter >= 4
+      if (event.vid == 73)
+        System.out.println()
 
-        //val info = VehicleInformation(currentReport, isStopped, segmentCrossed, lastReport._1.lane, lastReport._1.position)
+      state.update(reports ++ Map(event.vid -> (event.position, event.lane, newCounter.toByte, minute)))
 
-        state.update((currentReport, newCounter))
-
-        (XwayDir(key._1, key._2), PositionReport(
-          currentReport.time,
-          currentReport.vid,
-          currentReport.speed,
-          currentReport.xWay,
-          currentReport.lane,
-          currentReport.direction,
-          currentReport.segment,
-          currentReport.position,
-          currentReport.internalTime,
-          isStopped,
-          isCrossing,
-          lastReport._1.lane,
-          lastReport._1.position))
-
-      case None =>
-
-        state.update(currentReport, 1)
-
-        (XwayDir(key._1, key._2), PositionReport(
-          currentReport.time,
-          currentReport.vid,
-          currentReport.speed,
-          currentReport.xWay,
-          currentReport.lane,
-          currentReport.direction,
-          currentReport.segment,
-          currentReport.position,
-          currentReport.internalTime,
-          false,
-          true,
-          currentReport.lane,
-          currentReport.position))
+      (key, PositionReport(event.time, event.vid, event.speed, event.xWay, event.lane, event.direction, event.segment,
+        event.position, event.internalTime, isStopped, isCrossing, newMinute, lastReport._2, lastReport._1))
+    } else {
+      if (event.vid == 73)
+        System.out.println()
+      state.update(reports ++ Map(event.vid -> (event.position, event.lane, 1.toByte, event.time/60+1)))
+      (key, PositionReport(event.time, event.vid, event.speed, event.xWay, event.lane, event.direction, event.segment,
+        event.position, event.internalTime, isStopped = false, isCrossing = true, newMinute = true, 0, 0))
     }
 
   }
@@ -128,7 +106,7 @@ object VehicleStatistics {
     * @param state
     * @return
     */
-  def updateAccidents(key: XwayDir, value:Option[PositionReport], state:State[Map[Int, Accident]]):(String, (PositionReport, Int)) = {
+  def updateAccidents(key: XwayDir, value:Option[PositionReport], state:State[Map[Int, Accident]]):(VidTimeXway, (PositionReport, Int)) = {
 
     val report          = value.get
     val vid             = report.vid
@@ -253,7 +231,8 @@ object VehicleStatistics {
     if (report.vid == 16265 && report.time == 1150)
       System.out.print()*/
 
-    (s"${report.vid}.${report.time}.${report.xWay}",(report, segm))
+    //(s"${report.vid}-${report.time}-${report.xWay}",(report, segm))
+    (VidTimeXway(report.vid, report.time, report.xWay), (report, segm))
   }
 
   def findAcc(report:PositionReport, accidents:Array[Option[Accident]]): Int = {

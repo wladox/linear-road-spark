@@ -6,7 +6,7 @@ package com.github.wladox.model
 case class PositionReport(time:Int,
                           vid:Int,
                           speed:Int,
-                          xWay:Byte,
+                          xWay:Int,
                           lane:Byte,
                           direction:Byte,
                           segment:Byte,
@@ -14,6 +14,7 @@ case class PositionReport(time:Int,
                           internalTime:Long,
                           isStopped:Boolean,
                           isCrossing:Boolean,
+                          newMinute:Boolean,
                           lastLane:Byte,
                           lastPos:Int
                           ) {

@@ -2,6 +2,7 @@ package com.github.wladox
 
 import java.util
 
+import com.github.wladox.LinearRoadBenchmark.calculateToll
 import com.github.wladox.component.{TrafficAnalytics, VehicleStatistics, VidTimeXway, XWaySegDirMinute}
 import com.github.wladox.model.{Event, PositionReport, XwaySegDir}
 import org.apache.kafka.clients.consumer.ConsumerRecord
@@ -9,7 +10,7 @@ import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, Produce
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.spark.streaming.StateSpec._
 import org.apache.spark.streaming.kafka010.{ConsumerStrategies, KafkaUtils, LocationStrategies}
-import org.apache.spark.streaming.{Seconds, State, StateSpec, StreamingContext}
+import org.apache.spark.streaming.{Milliseconds, Seconds, State, StateSpec, StreamingContext}
 import org.apache.spark.{HashPartitioner, Partitioner, SparkConf, SparkContext}
 
 
@@ -47,10 +48,10 @@ object LinearRoadBenchmark {
 
     val conf = new SparkConf()
       //.setMaster("spark://"+host+":"+port) // use always "local[n]" locally where n is # of cores; host+":"+port otherwise
-      //.setMaster("local[*]")
+      .setMaster("local[*]")
       .setAppName("LinearRoadBenchmark")
       .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-      //.set("spark.executor.memory", "3g")
+      .set("spark.executor.memory", "3g")
       //.set("spark.default.parallelism", "1")
       //.set("spark.kryo.registrationRequired", "false") // https://issues.apache.org/jira/browse/SPARK-12591
       //.set("spark.streaming.blockInterval", "1000ms")
@@ -62,7 +63,7 @@ object LinearRoadBenchmark {
 
     val sc  = new SparkContext(conf)
     //sc.setLogLevel("debug")
-    val ssc = new StreamingContext(sc, Seconds(2))
+    val ssc = new StreamingContext(sc, Milliseconds(2000))
 
     ssc.checkpoint(checkpointDirectory)
     ssc
@@ -114,7 +115,7 @@ object LinearRoadBenchmark {
     val historicalTolls = ssc.sparkContext.textFile(history)
       .map(r => {
         val arr = r.split(",")
-        ((arr(0).toInt, arr(2).toByte), arr(3).toByte)
+        (s"${arr(0)}-${arr(2)}", arr(3).toByte)
       })
       .groupByKey()
       .mapValues(_.toArray)
@@ -126,30 +127,18 @@ object LinearRoadBenchmark {
 
     val events = streams
       .filter(v => !v.value().isEmpty)
-      .map(deserializeEvent)
-      //.transform(rdd => rdd.map(deserializeEvent).partitionBy(partitioner).setName("source"))
+      //.map(deserializeEvent)
+      .transform(rdd => rdd.map(deserializeEvent).partitionBy(partitioner).setName("source"))
       .cache()
 
 
     // ##################### DAILY EXPENDITURES RESPONSES ######################
-    events
+    val dailyExp = events
       .filter(_._2.typ == DAILY_EXPENDITURE_REQUEST)
       .map(e => {
-        val tolls = historyMap.value((e._2.vid, e._2.xWay))
+        val tolls = historyMap.value(s"${e._2.vid}-${e._2.xWay}")
         val emit = System.currentTimeMillis() - e._2.internalTime
         s"3,${e._2.time},$emit,${e._2.qid},${tolls(e._2.day-1)}"
-      })
-      .foreachRDD(rdd => {
-        rdd.foreachPartition(partition => {
-          val props = producerParams.value
-          val producer = new KafkaProducer[String, String](props)
-          partition.foreach( record => {
-            val data = record
-            val message = new ProducerRecord[String, String](outputTopic, null, data)
-            producer.send(message)
-          } )
-          producer.close()
-        })
       })
 
     val type0type2 = events
@@ -171,91 +160,67 @@ object LinearRoadBenchmark {
         }
       }
     }*/
+    val novPartitioner = new Partitioner() {
 
-    val updatedPositionReports = type0type2
+      override def numPartitions: Int = 2
+
+      override def getPartition(key: Any): Int = key match {
+        case null => 0
+        case XwaySegDir(xway, segment, direction) => nonNegativeMod(XwayDir(xway, direction).hashCode, numPartitions)
+        case XwayDir(xWay,dir) => nonNegativeMod(XwayDir(xWay, dir).hashCode, numPartitions)
+      }
+    }
+
+    val vehicles = type0type2
       .filter(e => e._2.typ == POSITION_REPORT)
-      .map(r => keyByVid(r._2))
-      .mapWithState(function(VehicleStatistics.updateLastReport _))
+      .mapWithState(function(VehicleStatistics.updateLastReport _).partitioner(partitioner))
+      .cache()
 
+    val accidents = vehicles
       //.mapWithState(function(VehicleStatistics.updateStoppedVehicles _))
+      .mapWithState(function(VehicleStatistics.updateAccidents _).partitioner(novPartitioner))
 
-    val accidents = updatedPositionReports
-      .mapWithState(function(VehicleStatistics.updateAccidents _))
-      //.saveAsTextFiles("output/vehicle-")
-
-      //.foreachRDD(rdd => println("RDD size " + rdd.count()))
-
-    // ##################### ACCIDENT NOTIFICATION ######################
-    accidents
-      .filter(v => v._2._1.isCrossing && v._2._1.lane != 4 &&  v._2._2 != -1)
+    val accidentNotifications = accidents
+      .filter(v => v._2._1.isCrossing && v._2._1.lane != 4 && v._2._2 != -1)
       .map(r => {
         val time = r._2._1.time
         val emit = System.currentTimeMillis() - r._2._1.internalTime
         val report = r._2._1
         s"1,$time,$emit,${report.xWay},${r._2._2},${report.direction},${report.vid}"
       })
-      .foreachRDD(rdd => {
-        rdd.foreachPartition(partition => {
-          val props = producerParams.value
-          val producer = new KafkaProducer[String, String](props)
-          partition.foreach( record => {
-            val data = record
-            val message = new ProducerRecord[String, String](outputTopic, null, data)
-            producer.send(message)
-          } )
-          producer.close()
-        })
-      })
 
-    /*val novPartitioner = new Partitioner() {
+
+    val keyedReports = vehicles
+      .mapValues(r => (r.vid, r.speed, r.time, r.segment, r.isCrossing, r.newMinute))
+      //.cache()
+    //.transform(rdd => rdd.map(r => (XwaySegDir(r._2.xWay, r._2.segment, r._2.direction), (r._2.vid, r._2.speed, r._2.time))).partitionBy(novPartitioner))
+
+    val vidPartitioner = new Partitioner() {
 
       override def numPartitions: Int = 2
 
       override def getPartition(key: Any): Int = key match {
         case null => 0
-        case XwaySegDir(xway, segment, direction) => {
-          nonNegativeMod(XwayDir(xway, direction).hashCode, numPartitions)
-        }
-      }
-    }*/
-
-    val keyedReports = type0type2
-      .filter(e => e._2.typ == POSITION_REPORT)
-      .map(r => (XwaySegDir(r._2.xWay, r._2.segment, r._2.direction), (r._2.vid, r._2.speed, r._2.time)))
-      .cache()
-    //.transform(rdd => rdd.map(r => (XwaySegDir(r._2.xWay, r._2.segment, r._2.direction), (r._2.vid, r._2.speed, r._2.time))).partitionBy(novPartitioner))
-
-    /*val vidPartitioner = new Partitioner() {
-
-      override def numPartitions: Int = 4
-
-      override def getPartition(key: Any): Int = key match {
-        case null => 0
-        case s:String => {
-          val splitted = s.split(".")
-          nonNegativeMod(s"${s(0)}.${s(2)}".hashCode, numPartitions)
+        case VidTimeXway(vid, time, xWay) => {nonNegativeMod((vid, xWay).hashCode, numPartitions)
         }
       }
 
-    }*/
+    }
 
     // ##################### NUMBER OF VEHICLES ######################
-    val NOV = keyedReports.mapWithState(function(TrafficAnalytics.updateNOV _))
+    //val NOV = keyedReports.mapWithState(function(TrafficAnalytics.updateNOV _)).saveAsTextFiles("output/nov")
       // TODO add partitioner
 
     // ##################### AVERAGE VELOCITY ######################
-    val LAV = keyedReports.mapWithState(function(TrafficAnalytics.updateLAV _))
+    val segStats = keyedReports.mapWithState(function(TrafficAnalytics.updateLAV _).partitioner(novPartitioner))
 
     // CORRECT ORDER DO NOT TOUCH
 
     // ##################### TOLL CALCULATION / NOTIFICATION ######################
-    val segmentStats = LAV
-      .join(NOV)    // JOIN CORRECTLY
-      .join(accidents) //.saveAsTextFiles("output/acc-")
-      .mapValues(v => (v._1._1, v._1._2, v._2._2, v._2._1.isCrossing))
+    val segmentStats = segStats.join(accidents, vidPartitioner).mapValues(v => (v._1._1, v._1._2, v._2._2, v._2._1.isCrossing))
 
     type0type2
-      .map(e => (s"${e._2.vid}.${e._2.time}.${e._2.xWay}", e))
+      .map(e => (VidTimeXway(e._2.vid,e._2.time,e._2.xWay), e))
       .join(segmentStats)
       .filter(r => (r._2._2._4 && r._2._1._2.lane != 4) || r._2._1._2.typ == ACCOUNT_BALANCE_REQUEST)
       .map(r => {
@@ -275,8 +240,9 @@ object LinearRoadBenchmark {
 
           (s"${event.vid},${event.xWay}", s"get,${event.time},${event.internalTime},$qid")
         }
-      })
-      .mapWithState(function(updateAccountBalance _))
+      }).mapWithState(function(updateAccountBalance _))
+      .union(dailyExp)
+      .union(accidentNotifications)
       .foreachRDD(rdd => {
         rdd.foreachPartition(partition => {
           val props = producerParams.value
@@ -472,7 +438,7 @@ object LinearRoadBenchmark {
         array(1).toShort,
         array(2).toInt,
         array(3).toInt,
-        array(4).toByte,
+        array(4).toInt,
         array(5).toByte,
         array(6).toByte,
         array(7).toByte,
@@ -489,12 +455,14 @@ object LinearRoadBenchmark {
     * @param e @see Event
     * @return Tuple (vehicleID, PositionReport)
     */
-  def keyByVid(e:Event):((Byte,Byte,Int), PositionReport) = {
-    ((e.xWay, e.direction, e.vid), PositionReport(e.time, e.vid, e.speed, e.xWay, e.lane, e.direction, e.segment, e.position, e.internalTime, isStopped = false, isCrossing = false, -1, -1))
+  def keyByVid(e:Event):((Int,Byte,Int), PositionReport) = {
+    ((e.xWay, e.direction, e.vid), PositionReport(e.time, e.vid, e.speed, e.xWay, e.lane, e.direction, e.segment,
+      e.position, e.internalTime, isStopped = false, isCrossing = false, newMinute = false, -1, -1))
   }
 
   def keyByXwayDir(e:Event):(XwayDir, PositionReport) = {
-    (XwayDir(e.xWay, e.direction), PositionReport(e.time, e.vid, e.speed, e.xWay, e.lane, e.direction, e.segment, e.position, e.internalTime, isStopped = false, isCrossing = false, -1, -1))
+    (XwayDir(e.xWay, e.direction), PositionReport(e.time, e.vid, e.speed, e.xWay, e.lane, e.direction, e.segment,
+      e.position, e.internalTime, isStopped = false, isCrossing = false, newMinute = false, -1, -1))
   }
 
   // UTILITY FUNCTIONS =============================

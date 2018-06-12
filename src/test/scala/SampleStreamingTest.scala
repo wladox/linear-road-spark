@@ -10,7 +10,7 @@ import org.scalatest.FunSuite
   */
 class SampleStreamingTest extends FunSuite with StreamingSuiteBase {
 
-  ignore("detect stopped vehicle") {
+  /*ignore("detect stopped vehicle") {
     val data = List(
       List((61, PositionReport(61, 260, 60, 0, 2, 1, 49, 232425, -1, false, false, -1, -1))),
       List((61, PositionReport(61, 260, 60, 0, 2, 1, 49, 232425, -1, false, false, -1, -1))),
@@ -23,7 +23,7 @@ class SampleStreamingTest extends FunSuite with StreamingSuiteBase {
 
     //testOperation[(Int,PositionReport), (Int, VehicleInformation)](data, myFunc, expected, false)
   }
-
+*/
   /*test("detect accident") {
 
     val vh1 = (XwayDir(0, 1), (VehicleInformation(PositionReport(61, 260, 60, 0, 2, 1, 49, 232425, -1), isStopped = true, isCrossing = false, 1, 232425), 2))

@@ -9,7 +9,7 @@ case class Event(
                   time:Short,
                   vid:Int,
                   speed:Int,
-                  xWay:Byte,
+                  xWay:Int,
                   lane:Byte,
                   direction:Byte,
                   segment:Byte,

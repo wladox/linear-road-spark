@@ -157,9 +157,9 @@ object StreamingWordCount {
 
 
 
-  def toPositionReport(e:Event):PositionReport = {
+  /*def toPositionReport(e:Event):PositionReport = {
     PositionReport(e.time, e.vid, e.speed, e.xWay, e.lane, e.direction, e.segment, e.position, e.internalTime, isStopped = false, isCrossing = false, -1, -1)
-  }
+  }*/
 
   def toTollHistory(array:Array[String]):TollHistory = {
     TollHistory(array(0).toInt, array(1).toInt, array(2).toInt, array(3).toInt)

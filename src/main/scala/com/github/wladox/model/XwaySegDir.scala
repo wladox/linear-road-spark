@@ -3,7 +3,7 @@ package com.github.wladox.model
 /**
   * Created by Wladimir Postnikov on 21.01.17.
   */
-case class XwaySegDir(xWay:Byte, segment:Byte, direction:Byte) {
+case class XwaySegDir(xWay:Int, segment:Int, direction:Int) {
 
   override def toString: String = s"$xWay.$segment.$direction"
 
@@ -17,9 +17,9 @@ case class XwaySegDir(xWay:Byte, segment:Byte, direction:Byte) {
   override def hashCode: Int = {
     val prime = 31
     var result = 1
-    result = prime * result + xWay.toInt
-    result = prime * result + segment.toInt
-    result = prime * result + direction.toInt
+    result = prime * result + xWay
+    result = prime * result + segment
+    result = prime * result + direction
     result
   }
 }

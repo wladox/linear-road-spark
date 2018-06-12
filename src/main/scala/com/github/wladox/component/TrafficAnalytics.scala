@@ -8,7 +8,7 @@ import org.apache.spark.streaming.State
   * Created by Wladimir Postnikov on 04.01.17.
   */
 
-case class XWaySegDirMinute(xWay:Byte, seg:Byte, dir:Byte, minute: Short) {
+case class XWaySegDirMinute(xWay:Int, seg:Int, dir:Int, minute: Short) {
 
   override def toString: String = xWay + "." + seg + "." + dir + "." + minute
 
@@ -22,7 +22,7 @@ case class XWaySegDirMinute(xWay:Byte, seg:Byte, dir:Byte, minute: Short) {
   override def hashCode: Int = {
     val prime = 31
     var result = 1
-    result = prime * result + xWay.toInt
+    result = prime * result + xWay
     result = prime * result + seg.toInt
     result = prime * result + dir.toInt
     result = prime * result + minute.toInt
@@ -38,12 +38,12 @@ case class VidTimeXway(vid:Int, time:Int, xWay:Int) {
 
   override def equals(that: Any): Boolean =
     that match {
-      case that: VidTimeXway => that.canEqual(this) && this.hashCode == that.hashCode
+      case that: VidTimeXway => that.canEqual(this) && this.vid == that.vid && this.time == that.time && this.xWay == that.xWay
       case _ => false
     }
   override def hashCode: Int = {
     val prime = 31
-    var result = 1
+    var result = 17
     result = prime * result + xWay
     result = prime * result + vid
     result = prime * result + time
@@ -178,34 +178,51 @@ object TrafficAnalytics {
     * @param state Map(Minute -> (Speed, Count)
     * @return ((VID, time, Xway), LAV)
     */
-  def updateLAV(key:XwaySegDir, value:Option[(Int, Int, Short)], state:State[Array[(Int,Int)]]):(String, Int) = {
+  def updateLAV(key:XwayDir, value:Option[(Int, Int, Int, Byte, Boolean, Boolean)], state:State[Map[Byte,Array[(Int,Int,Int)]]]):(VidTimeXway, (Int,Int)) = {
 
     val vid     = value.get._1
     val speed   = value.get._2
     val minute  = value.get._3/60+1
+    val segment = value.get._4
+    val inc     = if (value.get._5) 1 else 0
 
     val newState = state.getOption() match {
       case Some(s) =>
-        s(minute) = (s(minute)._1 + speed, s(minute)._2 + 1)
-        s
+        val newArray = if (s.contains(segment)) {
+          val segStat = s(segment)
+          segStat(minute) = (segStat(minute)._1 + speed, segStat(minute)._2 + 1, segStat(minute)._3 + inc)
+          segStat
+        } else {
+          val arr = Array.fill(181)((0,0,0))
+          arr(minute) = (speed, 1, 1)
+          arr
+        }
+        s ++ Map[Byte, Array[(Int,Int,Int)]](segment -> newArray)
       case None =>
         // first minute of simulation, thus no LAV exists
-        val arr = Array.fill(181)((0,0))
-        arr(minute) = (speed, 1)
-        arr
+        val arr = Array.fill(181)((0,0,0))
+        arr(minute) = (speed, 1, 1)
+        Map[Byte, Array[(Int,Int,Int)]](segment -> arr)
     }
 
     state.update(newState)
 
-    val statistics = for (i <- minute-5 until minute if i > 0) yield newState(i)
+    val previousMinute = value.get._3/60
+    val segmentStatistics = newState(segment)
+    val nov = segmentStatistics(previousMinute)._3
+
+    val statistics = for (i <- minute-5 until minute if i > 0) yield segmentStatistics(i)
+
+    if (vid == 20716 && value.get._3 == 903)
+      System.out.println(key + " " + value.get)
 
     if (statistics.nonEmpty) {
-
-      val lav = statistics.foldLeft((0, 0)) { case ((t1speed, t1count), (t2speed, t2count)) => (t1speed + t2speed, t1count + t2count) }
-
-      (s"$vid.${value.get._3}.${key.xWay}", math.round(lav._1/lav._2.toFloat))
+      val lav = statistics.foldLeft((0, 0, 0)) { case ((t1speed, t1count, t1nov), (t2speed, t2count, t2nov)) => (t1speed + t2speed, t1count + t2count, 0) }
+      //(s"$vid-${value.get._3}-${key.xWay}", (math.round(lav._1/lav._2.toFloat), nov))
+      (VidTimeXway(vid,value.get._3,key.xWay), (math.round(lav._1/lav._2.toFloat), nov))
     } else {
-      (s"$vid.${value.get._3}.${key.xWay}", 0)
+      //(s"$vid-${value.get._3}-${key.xWay}", (0, nov))
+      (VidTimeXway(vid,value.get._3,key.xWay), (0, nov))
     }
 
   }
@@ -221,7 +238,6 @@ object TrafficAnalytics {
 
     val vid   = value.get._1
     val time  = value.get._3
-
     val minute = (time/60+1).toString
 
     val newState = state.getOption() match {
