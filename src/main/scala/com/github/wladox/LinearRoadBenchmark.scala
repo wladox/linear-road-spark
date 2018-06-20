@@ -113,6 +113,10 @@ object LinearRoadBenchmark {
     val producerParams = ssc.sparkContext.broadcast(props)
 
     val historicalTolls = ssc.sparkContext.textFile(history)
+      /*.map(r => {
+        val arr = r.split(",")
+        (s"${arr(0)}-${arr(1)}-${arr(2)}", arr(3).toByte)
+      })*/
       .map(r => {
         val arr = r.split(",")
         (s"${arr(0)}-${arr(2)}", arr(3).toByte)
@@ -129,6 +133,7 @@ object LinearRoadBenchmark {
       .filter(v => !v.value().isEmpty)
       //.map(deserializeEvent)
       .transform(rdd => rdd.map(deserializeEvent).partitionBy(partitioner).setName("source"))
+      //.checkpoint(Seconds(4))
       .cache()
 
 
@@ -144,6 +149,7 @@ object LinearRoadBenchmark {
     val type0type2 = events
       .filter(e => e._2.typ == POSITION_REPORT || e._2.typ == ACCOUNT_BALANCE_REQUEST)
       .cache()
+
 
     // ##################### ACCIDENT DETECTION ######################
 
@@ -173,20 +179,25 @@ object LinearRoadBenchmark {
 
     val vehicles = type0type2
       .filter(e => e._2.typ == POSITION_REPORT)
-      .mapWithState(function(VehicleStatistics.updateLastReport _).partitioner(partitioner))
+      .mapWithState(function(VehicleStatistics.updateLastReport _))
       .cache()
+
+    //vehicles.foreachRDD(rdd => rdd.foreachPartition(p => println("partition " + p + " " + p.size)))
 
     val accidents = vehicles
       //.mapWithState(function(VehicleStatistics.updateStoppedVehicles _))
-      .mapWithState(function(VehicleStatistics.updateAccidents _).partitioner(novPartitioner))
+      .mapWithState(function(VehicleStatistics.updateAccidents _))
+      //.checkpoint(Seconds(4))
+
+
+    //accidents.foreachRDD(rdd => rdd.foreachPartition(p => println("partition " + p + " " + p.size)))
 
     val accidentNotifications = accidents
       .filter(v => v._2._1.isCrossing && v._2._1.lane != 4 && v._2._2 != -1)
       .map(r => {
-        val time = r._2._1.time
-        val emit = System.currentTimeMillis() - r._2._1.internalTime
         val report = r._2._1
-        s"1,$time,$emit,${report.xWay},${r._2._2},${report.direction},${report.vid}"
+        val emit = System.currentTimeMillis() - report.internalTime
+        s"1,${report.time},$emit,${report.xWay},${r._2},${report.direction},${report.vid}"
       })
 
 
@@ -212,15 +223,18 @@ object LinearRoadBenchmark {
       // TODO add partitioner
 
     // ##################### AVERAGE VELOCITY ######################
-    val segStats = keyedReports.mapWithState(function(TrafficAnalytics.updateLAV _).partitioner(novPartitioner))
+    val segStats = keyedReports.mapWithState(function(TrafficAnalytics.updateLAV _))
 
     // CORRECT ORDER DO NOT TOUCH
 
     // ##################### TOLL CALCULATION / NOTIFICATION ######################
-    val segmentStats = segStats.join(accidents, vidPartitioner).mapValues(v => (v._1._1, v._1._2, v._2._2, v._2._1.isCrossing))
+    val segmentStats = segStats
+      .join(accidents)
+      .mapValues(v => (v._1._1, v._1._2, v._2._2, v._2._1.isCrossing))
+      //.checkpoint(Seconds(4))
 
     type0type2
-      .map(e => (VidTimeXway(e._2.vid,e._2.time,e._2.xWay), e))
+      .transform(rdd => rdd.map(e => (VidTimeXway(e._2.vid,e._2.time,e._2.xWay), e)))
       .join(segmentStats)
       .filter(r => (r._2._2._4 && r._2._1._2.lane != 4) || r._2._1._2.typ == ACCOUNT_BALANCE_REQUEST)
       .map(r => {
@@ -240,7 +254,8 @@ object LinearRoadBenchmark {
 
           (s"${event.vid},${event.xWay}", s"get,${event.time},${event.internalTime},$qid")
         }
-      }).mapWithState(function(updateAccountBalance _))
+      })
+      .mapWithState(function(updateAccountBalance _).numPartitions(4))
       .union(dailyExp)
       .union(accidentNotifications)
       .foreachRDD(rdd => {
@@ -264,6 +279,18 @@ object LinearRoadBenchmark {
   def nonNegativeMod(x: Int, mod: Int): Int = {
     val rawMod = x % mod
     rawMod + (if (rawMod < 0) mod else 0)
+  }
+
+  def getDailyExpenditure(key: String, value:Option[(Int, Long, String)], state:State[String]):String = {
+
+    val time = value.get._1
+    val internalTime = value.get._2
+    val qid = value.get._3
+
+    val bal = state.getOption().get
+
+    val emit = System.currentTimeMillis() - internalTime
+    s"3,$time,$emit,$qid,$bal}"
   }
 
   /**
