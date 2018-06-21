@@ -92,7 +92,7 @@ object LinearRoadBenchmark {
       "key.deserializer" -> classOf[StringDeserializer],
       "value.deserializer" -> classOf[StringDeserializer],
       "group.id" -> groupId,
-      "auto.offset.reset" -> "earliest",
+      "auto.offset.reset" -> "latest",
       "enable.auto.commit" -> (false: java.lang.Boolean)
     )
 
@@ -202,7 +202,8 @@ object LinearRoadBenchmark {
 
 
     val keyedReports = vehicles
-      .mapValues(r => (r.vid, r.speed, r.time, r.segment, r.isCrossing, r.newMinute))
+      .map(r => (XwaySegDir(r._1.xWay, r._2.segment, r._1.dir), (r._2.vid, r._2.speed, r._2.time, r._2.isCrossing, r._2.newMinute)))
+
       //.cache()
     //.transform(rdd => rdd.map(r => (XwaySegDir(r._2.xWay, r._2.segment, r._2.direction), (r._2.vid, r._2.speed, r._2.time))).partitionBy(novPartitioner))
 
@@ -223,8 +224,8 @@ object LinearRoadBenchmark {
       // TODO add partitioner
 
     // ##################### AVERAGE VELOCITY ######################
-    val segStats = keyedReports.mapWithState(function(TrafficAnalytics.updateLAV _))
-
+    val segStats = keyedReports
+      .mapWithState(function(TrafficAnalytics.updateLAV _))//.saveAsTextFiles("output/stats")
     // CORRECT ORDER DO NOT TOUCH
 
     // ##################### TOLL CALCULATION / NOTIFICATION ######################
@@ -255,7 +256,7 @@ object LinearRoadBenchmark {
           (s"${event.vid},${event.xWay}", s"get,${event.time},${event.internalTime},$qid")
         }
       })
-      .mapWithState(function(updateAccountBalance _).numPartitions(4))
+      .mapWithState(function(updateAccountBalance _))
       .union(dailyExp)
       .union(accidentNotifications)
       .foreachRDD(rdd => {
