@@ -2,7 +2,6 @@ package com.github.wladox
 
 import java.util
 
-import com.github.wladox.LinearRoadBenchmark.calculateToll
 import com.github.wladox.component.{TrafficAnalytics, VehicleStatistics, VidTimeXway, XWaySegDirMinute}
 import com.github.wladox.model.{Event, PositionReport, XwaySegDir}
 import org.apache.kafka.clients.consumer.ConsumerRecord
@@ -10,7 +9,7 @@ import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, Produce
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.spark.streaming.StateSpec._
 import org.apache.spark.streaming.kafka010.{ConsumerStrategies, KafkaUtils, LocationStrategies}
-import org.apache.spark.streaming.{Milliseconds, Seconds, State, StateSpec, StreamingContext}
+import org.apache.spark.streaming.{Milliseconds, State, StreamingContext}
 import org.apache.spark.{HashPartitioner, Partitioner, SparkConf, SparkContext}
 
 
@@ -180,6 +179,7 @@ object LinearRoadBenchmark {
     val vehicles = type0type2
       .filter(e => e._2.typ == POSITION_REPORT)
       .mapWithState(function(VehicleStatistics.updateLastReport _))
+      .checkpoint(Milliseconds(6000))
       .cache()
 
     //vehicles.foreachRDD(rdd => rdd.foreachPartition(p => println("partition " + p + " " + p.size)))
@@ -187,7 +187,7 @@ object LinearRoadBenchmark {
     val accidents = vehicles
       //.mapWithState(function(VehicleStatistics.updateStoppedVehicles _))
       .mapWithState(function(VehicleStatistics.updateAccidents _))
-      //.checkpoint(Seconds(4))
+      .checkpoint(Milliseconds(6000))
 
 
     //accidents.foreachRDD(rdd => rdd.foreachPartition(p => println("partition " + p + " " + p.size)))
@@ -226,6 +226,7 @@ object LinearRoadBenchmark {
     // ##################### AVERAGE VELOCITY ######################
     val segStats = keyedReports
       .mapWithState(function(TrafficAnalytics.updateLAV _))//.saveAsTextFiles("output/stats")
+      .checkpoint(Milliseconds(6000))
     // CORRECT ORDER DO NOT TOUCH
 
     // ##################### TOLL CALCULATION / NOTIFICATION ######################
@@ -257,6 +258,7 @@ object LinearRoadBenchmark {
         }
       })
       .mapWithState(function(updateAccountBalance _))
+      .checkpoint(Milliseconds(6000))
       .union(dailyExp)
       .union(accidentNotifications)
       .foreachRDD(rdd => {
